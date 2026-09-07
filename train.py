@@ -24,6 +24,7 @@ TRAINING_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = TRAINING_DIR / "data"
 DEFAULT_PRETRAINED_PATH = TRAINING_DIR / "yolo_state_dict.pt"
 DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_backbone"
+DEFAULT_FULL_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_full"
 
 
 @dataclass
@@ -48,6 +49,7 @@ class TrainConfig:
 
     use_augmentation: bool = True
     use_amp: bool = True
+    full_model: bool = False
     seed: int = 42
     log_interval: int = 20
 
@@ -110,9 +112,11 @@ def train_one_epoch(
     gradient_clip_norm: float,
     log_interval: int,
     epoch: int,
+    freeze_backbone: bool,
 ) -> float:
     model.train()
-    keep_backbone_frozen(model)
+    if freeze_backbone:
+        keep_backbone_frozen(model)
 
     accumulated_loss = 0.0
     processed_images = 0
@@ -255,10 +259,19 @@ def train(config: TrainConfig) -> None:
     print(f"Device: {device}")
     print(f"AMP: {amp_enabled}")
 
+    pretrained_mode = (
+        "backbone_neck" if config.full_model else "backbone"
+    )
+    freeze_pretrained = not config.full_model
+    training_mode = (
+        "full model" if config.full_model else "frozen backbone"
+    )
+    print(f"Training mode: {training_mode}")
+
     model, load_report = build_detection_model(
         checkpoint_path=config.pretrained_path,
-        mode="backbone",
-        freeze_loaded=True,
+        mode=pretrained_mode,
+        freeze_loaded=freeze_pretrained,
         strict=True,
         num_classes=config.num_classes,
     )
@@ -364,6 +377,7 @@ def train(config: TrainConfig) -> None:
             gradient_clip_norm=config.gradient_clip_norm,
             log_interval=config.log_interval,
             epoch=epoch,
+            freeze_backbone=not config.full_model,
         )
         validation_loss = validate(
             model=model,
@@ -413,8 +427,8 @@ def train(config: TrainConfig) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Fine-tune YOLO11n trên VisDrone DET: freeze pretrained backbone "
-            "và train neck + detection head."
+            "Fine-tune YOLO11n trên VisDrone DET với lựa chọn freeze "
+            "backbone hoặc train toàn bộ model."
         )
     )
     parser.add_argument("--epochs", type=int, default=50)
@@ -440,7 +454,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEFAULT_OUTPUT_DIR,
+        default=None,
+        help=(
+            "Thư mục checkpoint. Mặc định là runs/visdrone_backbone hoặc "
+            "runs/visdrone_full tùy chế độ train."
+        ),
+    )
+    parser.add_argument(
+        "--full-model",
+        action="store_true",
+        help=(
+            "Train toàn bộ backbone + neck + detection head. Nếu không bật, "
+            "backbone sẽ được đóng băng."
+        ),
     )
     parser.add_argument(
         "--no-amp",
@@ -477,6 +503,14 @@ def validate_config(config: TrainConfig) -> None:
 if __name__ == "__main__":
     args = parse_args()
     data_dir = args.data_dir.expanduser().resolve()
+    default_output_dir = (
+        DEFAULT_FULL_OUTPUT_DIR if args.full_model else DEFAULT_OUTPUT_DIR
+    )
+    output_dir = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir is not None
+        else default_output_dir
+    )
 
     training_config = TrainConfig(
         train_images=data_dir / "VisDrone2019-DET-train" / "images",
@@ -484,7 +518,7 @@ if __name__ == "__main__":
         val_images=data_dir / "VisDrone2019-DET-val" / "images",
         val_labels=data_dir / "VisDrone2019-DET-val" / "annotations",
         pretrained_path=args.pretrained.expanduser().resolve(),
-        output_dir=args.output_dir.expanduser().resolve(),
+        output_dir=output_dir,
         image_size=args.image_size,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -495,6 +529,7 @@ if __name__ == "__main__":
         gradient_clip_norm=args.gradient_clip,
         use_augmentation=not args.no_augmentation,
         use_amp=not args.no_amp,
+        full_model=args.full_model,
         seed=args.seed,
         log_interval=args.log_interval,
     )
