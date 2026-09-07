@@ -10,8 +10,20 @@ import torch
 import torch.nn as nn
 
 if __package__:
+    from .config_utils import (
+        DEFAULT_CONFIG_PATH,
+        get_section,
+        load_config,
+        resolve_config_path,
+    )
     from .model import MyYOLODetectionModel
 else:
+    from config_utils import (
+        DEFAULT_CONFIG_PATH,
+        get_section,
+        load_config,
+        resolve_config_path,
+    )
     from model import MyYOLODetectionModel
 
 
@@ -286,41 +298,41 @@ build_ppe_model = build_detection_model
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load pretrained YOLO11n Detect cho model đích."
+        description="Load pretrained YOLO11n Detect theo config YAML."
     )
     parser.add_argument(
-        "--checkpoint",
+        "--config",
         type=Path,
-        default=DEFAULT_CHECKPOINT,
-        help="Đường dẫn tới yolo_state_dict.pt.",
-    )
-    parser.add_argument(
-        "--mode",
-        choices=tuple(MODE_LAST_BLOCK),
-        default="backbone_neck",
-        help="Phần model cần load pretrained.",
-    )
-    parser.add_argument(
-        "--freeze-loaded",
-        action="store_true",
-        help="Freeze các parameter được load.",
-    )
-    parser.add_argument(
-        "--non-strict",
-        action="store_true",
-        help="Bỏ qua key hoặc tensor không tương thích.",
+        default=DEFAULT_CONFIG_PATH,
+        help="Đường dẫn tới config.yaml.",
     )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    detection_model, load_report = build_detection_model(
-        checkpoint_path=args.checkpoint,
-        mode=args.mode,
-        freeze_loaded=args.freeze_loaded,
-        strict=not args.non_strict,
+    cli_args = parse_args()
+    raw_config, config_dir = load_config(cli_args.config)
+    pretrained_section = get_section(raw_config, "pretrained")
+    checkpoint_path = resolve_config_path(
+        pretrained_section["checkpoint"],
+        config_dir,
+        "pretrained.checkpoint",
     )
+    mode = str(pretrained_section["mode"])
+    if mode not in MODE_LAST_BLOCK:
+        valid_modes = ", ".join(MODE_LAST_BLOCK)
+        raise ValueError(
+            f"pretrained.mode='{mode}' không hợp lệ. Chọn: {valid_modes}."
+        )
+
+    detection_model, load_report = build_detection_model(
+        checkpoint_path=checkpoint_path,
+        mode=mode,
+        freeze_loaded=bool(pretrained_section["freeze_loaded"]),
+        strict=bool(pretrained_section["strict"]),
+        num_classes=int(pretrained_section["num_classes"]),
+    )
+    print(f"Config: {cli_args.config.expanduser().resolve()}")
     print(load_report)
     print(
         "Số parameter có thể train:",

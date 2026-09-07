@@ -8,24 +8,23 @@ import numpy as np
 import torch
 
 if __package__:
+    from .config_utils import (
+        DEFAULT_CONFIG_PATH,
+        get_section,
+        load_config,
+        resolve_config_path,
+    )
     from .dataset import VISDRONE_CLASS_NAMES
     from .model import MyYOLODetectionModel
 else:
+    from config_utils import (
+        DEFAULT_CONFIG_PATH,
+        get_section,
+        load_config,
+        resolve_config_path,
+    )
     from dataset import VISDRONE_CLASS_NAMES
     from model import MyYOLODetectionModel
-
-
-TRAINING_DIR = Path(__file__).resolve().parent
-DEFAULT_CHECKPOINT = (
-    TRAINING_DIR / "runs" / "visdrone_backbone" / "best.pt"
-)
-DEFAULT_IMAGE = (
-    TRAINING_DIR / "data" / "VisDrone2019-DET-val" / "images" /
-    "0000001_02999_d_0000005.jpg"
-)
-DEFAULT_OUTPUT = (
-    TRAINING_DIR / "runs" / "visdrone_backbone" / "prediction.jpg"
-)
 
 
 def choose_device(requested_device: str) -> torch.device:
@@ -555,31 +554,13 @@ def predict_image(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load best.pt và thử nhận diện trên một ảnh VisDrone."
+        description="Nhận diện ảnh VisDrone theo config YAML."
     )
     parser.add_argument(
-        "--checkpoint",
+        "--config",
         type=Path,
-        default=DEFAULT_CHECKPOINT,
-    )
-    parser.add_argument(
-        "--image",
-        type=Path,
-        default=DEFAULT_IMAGE,
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=DEFAULT_OUTPUT,
-    )
-    parser.add_argument("--image-size", type=int, default=640)
-    parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument("--iou", type=float, default=0.45)
-    parser.add_argument("--max-det", type=int, default=300)
-    parser.add_argument(
-        "--device",
-        default="auto",
-        help="auto, cpu, cuda, cuda:0 hoặc mps.",
+        default=DEFAULT_CONFIG_PATH,
+        help="Đường dẫn tới config.yaml.",
     )
     return parser.parse_args()
 
@@ -598,14 +579,35 @@ def validate_args(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    arguments = parse_args()
+    cli_args = parse_args()
+    raw_config, config_dir = load_config(cli_args.config)
+    predict_section = get_section(raw_config, "predict")
+    arguments = argparse.Namespace(
+        checkpoint=resolve_config_path(
+            predict_section["checkpoint"],
+            config_dir,
+            "predict.checkpoint",
+        ),
+        image=resolve_config_path(
+            predict_section["image"], config_dir, "predict.image"
+        ),
+        output=resolve_config_path(
+            predict_section["output"], config_dir, "predict.output"
+        ),
+        image_size=int(predict_section["image_size"]),
+        conf=float(predict_section["confidence_threshold"]),
+        iou=float(predict_section["iou_threshold"]),
+        max_det=int(predict_section["max_detections"]),
+        device=str(predict_section["device"]),
+    )
     validate_args(arguments)
 
     inference_device = choose_device(arguments.device)
-    checkpoint_path = arguments.checkpoint.expanduser().resolve()
-    image_path = arguments.image.expanduser().resolve()
-    output_path = arguments.output.expanduser().resolve()
+    checkpoint_path = arguments.checkpoint
+    image_path = arguments.image
+    output_path = arguments.output
 
+    print(f"Config: {cli_args.config.expanduser().resolve()}")
     print(f"Device: {inference_device}")
     detections = predict_image(
         checkpoint_path=checkpoint_path,

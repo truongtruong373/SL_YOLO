@@ -5,11 +5,14 @@ from pathlib import Path
 
 import cv2
 
+from config_utils import (
+    DEFAULT_CONFIG_PATH,
+    get_section,
+    load_config,
+    resolve_config_path,
+)
 from dataset import VISDRONE_CLASS_NAMES
 from predict_image import (
-    DEFAULT_CHECKPOINT,
-    DEFAULT_IMAGE,
-    DEFAULT_OUTPUT,
     class_color,
     choose_device,
     predict_image,
@@ -18,51 +21,13 @@ from predict_image import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Test model VisDrone đã train trên một ảnh và hiển thị kết quả."
-        )
+        description="Test model và ground truth VisDrone theo config YAML."
     )
     parser.add_argument(
-        "--checkpoint",
+        "--config",
         type=Path,
-        default=DEFAULT_CHECKPOINT,
-        help="Checkpoint best.pt hoặc last.pt.",
-    )
-    parser.add_argument(
-        "--image",
-        type=Path,
-        default=DEFAULT_IMAGE,
-        help="Ảnh cần nhận diện.",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=DEFAULT_OUTPUT,
-        help="Nơi lưu ảnh đã vẽ bounding box.",
-    )
-    parser.add_argument(
-        "--annotation",
-        type=Path,
-        default=None,
-        help=(
-            "Annotation VisDrone của ảnh. Mặc định tự tìm trong thư mục "
-            "annotations nằm cạnh thư mục images."
-        ),
-    )
-    parser.add_argument(
-        "--ground-truth-output",
-        type=Path,
-        default=None,
-        help="Nơi lưu ảnh ground truth (mặc định cạnh ảnh prediction).",
-    )
-    parser.add_argument("--image-size", type=int, default=640)
-    parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument("--iou", type=float, default=0.45)
-    parser.add_argument("--max-det", type=int, default=300)
-    parser.add_argument(
-        "--device",
-        default="auto",
-        help="auto, cpu, cuda, cuda:0 hoặc mps.",
+        default=DEFAULT_CONFIG_PATH,
+        help="Đường dẫn tới config.yaml.",
     )
     return parser.parse_args()
 
@@ -78,6 +43,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("iou phải nằm trong [0, 1].")
     if args.max_det <= 0:
         raise ValueError("max-det phải lớn hơn 0.")
+    if args.max_window_width <= 0:
+        raise ValueError("max_window_width phải lớn hơn 0.")
 
 
 def resolve_annotation_path(
@@ -175,7 +142,11 @@ def draw_ground_truth(
     return object_count
 
 
-def show_results(prediction_path: Path, ground_truth_path: Path) -> None:
+def show_results(
+    prediction_path: Path,
+    ground_truth_path: Path,
+    max_window_width: int,
+) -> None:
     prediction = cv2.imread(str(prediction_path), cv2.IMREAD_COLOR)
     ground_truth = cv2.imread(str(ground_truth_path), cv2.IMREAD_COLOR)
     if prediction is None:
@@ -187,7 +158,6 @@ def show_results(prediction_path: Path, ground_truth_path: Path) -> None:
 
     prediction_window = "Prediction"
     ground_truth_window = "Ground truth"
-    max_window_width = 620
     prediction_scale = min(
         max_window_width / prediction.shape[1], 1.0
     )
@@ -224,15 +194,46 @@ def show_results(prediction_path: Path, ground_truth_path: Path) -> None:
 
 
 def main() -> None:
-    args = parse_args()
+    cli_args = parse_args()
+    raw_config, config_dir = load_config(cli_args.config)
+    test_section = get_section(raw_config, "test")
+    args = argparse.Namespace(
+        checkpoint=resolve_config_path(
+            test_section["checkpoint"], config_dir, "test.checkpoint"
+        ),
+        image=resolve_config_path(
+            test_section["image"], config_dir, "test.image"
+        ),
+        output=resolve_config_path(
+            test_section["output"], config_dir, "test.output"
+        ),
+        annotation=resolve_config_path(
+            test_section.get("annotation"),
+            config_dir,
+            "test.annotation",
+            allow_none=True,
+        ),
+        ground_truth_output=resolve_config_path(
+            test_section.get("ground_truth_output"),
+            config_dir,
+            "test.ground_truth_output",
+            allow_none=True,
+        ),
+        image_size=int(test_section["image_size"]),
+        conf=float(test_section["confidence_threshold"]),
+        iou=float(test_section["iou_threshold"]),
+        max_det=int(test_section["max_detections"]),
+        device=str(test_section["device"]),
+        max_window_width=int(test_section["max_window_width"]),
+    )
     validate_args(args)
 
-    checkpoint_path = args.checkpoint.expanduser().resolve()
-    image_path = args.image.expanduser().resolve()
-    output_path = args.output.expanduser().resolve()
+    checkpoint_path = args.checkpoint
+    image_path = args.image
+    output_path = args.output
     annotation_path = resolve_annotation_path(image_path, args.annotation)
     ground_truth_output = (
-        args.ground_truth_output.expanduser().resolve()
+        args.ground_truth_output
         if args.ground_truth_output is not None
         else output_path.with_name(
             f"{output_path.stem}_ground_truth{output_path.suffix}"
@@ -240,6 +241,7 @@ def main() -> None:
     )
     device = choose_device(args.device)
 
+    print(f"Config: {cli_args.config.expanduser().resolve()}")
     print(f"Device: {device}")
     detections = predict_image(
         checkpoint_path=checkpoint_path,
@@ -276,7 +278,11 @@ def main() -> None:
     print(f"Đã lưu ảnh prediction: {output_path}")
     print(f"Đã lưu ảnh ground truth: {ground_truth_output}")
     print("Nhấn phím bất kỳ trong một cửa sổ ảnh để đóng cả hai.")
-    show_results(output_path, ground_truth_output)
+    show_results(
+        output_path,
+        ground_truth_output,
+        max_window_width=args.max_window_width,
+    )
 
 
 if __name__ == "__main__":

@@ -11,10 +11,22 @@ import torch
 import torch.nn as nn
 
 if __package__:
+    from .config_utils import (
+        DEFAULT_CONFIG_PATH,
+        get_section,
+        load_config,
+        resolve_config_path,
+    )
     from .dataset import VISDRONE_CLASS_NAMES, create_dataloader
     from .load_pretrained import build_detection_model
     from .loss import YOLODetectionLoss, YOLOLossConfig
 else:
+    from config_utils import (
+        DEFAULT_CONFIG_PATH,
+        get_section,
+        load_config,
+        resolve_config_path,
+    )
     from dataset import VISDRONE_CLASS_NAMES, create_dataloader
     from load_pretrained import build_detection_model
     from loss import YOLODetectionLoss, YOLOLossConfig
@@ -24,7 +36,6 @@ TRAINING_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = TRAINING_DIR / "data"
 DEFAULT_PRETRAINED_PATH = TRAINING_DIR / "yolo_state_dict.pt"
 DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_backbone"
-DEFAULT_FULL_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_full"
 
 
 @dataclass
@@ -52,6 +63,16 @@ class TrainConfig:
     full_model: bool = False
     seed: int = 42
     log_interval: int = 20
+
+    reg_max: int = 16
+    strides: tuple[int, ...] = (8, 16, 32)
+    box_gain: float = 7.5
+    cls_gain: float = 0.5
+    dfl_gain: float = 1.5
+    assigner_topk: int = 10
+    assigner_alpha: float = 0.5
+    assigner_beta: float = 6.0
+    scale_loss_by_batch: bool = True
 
 
 def set_random_seed(seed: int) -> None:
@@ -300,8 +321,15 @@ def train(config: TrainConfig) -> None:
     criterion = YOLODetectionLoss(
         YOLOLossConfig(
             num_classes=config.num_classes,
-            reg_max=16,
-            strides=(8, 16, 32),
+            reg_max=config.reg_max,
+            strides=config.strides,
+            box_gain=config.box_gain,
+            cls_gain=config.cls_gain,
+            dfl_gain=config.dfl_gain,
+            assigner_topk=config.assigner_topk,
+            assigner_alpha=config.assigner_alpha,
+            assigner_beta=config.assigner_beta,
+            scale_loss_by_batch=config.scale_loss_by_batch,
         )
     ).to(device)
 
@@ -427,65 +455,31 @@ def train(config: TrainConfig) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Fine-tune YOLO11n trên VisDrone DET với lựa chọn freeze "
-            "backbone hoặc train toàn bộ model."
+            "Fine-tune YOLO11n trên VisDrone DET theo config YAML."
         )
     )
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--image-size", type=int, default=640)
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--min-lr", type=float, default=1e-5)
-    parser.add_argument("--weight-decay", type=float, default=5e-4)
-    parser.add_argument("--gradient-clip", type=float, default=10.0)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--log-interval", type=int, default=20)
     parser.add_argument(
-        "--pretrained",
+        "--config",
         type=Path,
-        default=DEFAULT_PRETRAINED_PATH,
-    )
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=DEFAULT_DATA_DIR,
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Thư mục checkpoint. Mặc định là runs/visdrone_backbone hoặc "
-            "runs/visdrone_full tùy chế độ train."
-        ),
-    )
-    parser.add_argument(
-        "--full-model",
-        action="store_true",
-        help=(
-            "Train toàn bộ backbone + neck + detection head. Nếu không bật, "
-            "backbone sẽ được đóng băng."
-        ),
-    )
-    parser.add_argument(
-        "--no-amp",
-        action="store_true",
-        help="Tắt mixed precision.",
-    )
-    parser.add_argument(
-        "--no-augmentation",
-        action="store_true",
-        help="Tắt horizontal flip.",
+        default=DEFAULT_CONFIG_PATH,
+        help="Đường dẫn tới config.yaml.",
     )
     return parser.parse_args()
 
 
 def validate_config(config: TrainConfig) -> None:
+    if config.num_classes != len(VISDRONE_CLASS_NAMES):
+        raise ValueError("VisDrone DET phải có num_classes=10.")
+    if config.image_size <= 0 or config.image_size % 32 != 0:
+        raise ValueError(
+            "image_size phải lớn hơn 0 và chia hết cho 32."
+        )
     if config.epochs <= 0:
         raise ValueError("epochs phải lớn hơn 0.")
     if config.batch_size <= 0:
         raise ValueError("batch_size phải lớn hơn 0.")
+    if config.num_workers < 0:
+        raise ValueError("workers không được âm.")
     if config.learning_rate <= 0:
         raise ValueError("learning_rate phải lớn hơn 0.")
     if config.min_learning_rate < 0:
@@ -496,20 +490,46 @@ def validate_config(config: TrainConfig) -> None:
         )
     if config.weight_decay < 0:
         raise ValueError("weight_decay không được âm.")
+    if config.gradient_clip_norm < 0:
+        raise ValueError("gradient_clip_norm không được âm.")
     if config.log_interval <= 0:
         raise ValueError("log_interval phải lớn hơn 0.")
+    if config.reg_max != 16:
+        raise ValueError(
+            "Kiến trúc Detect hiện tại yêu cầu train.loss.reg_max=16."
+        )
+    if config.strides != (8, 16, 32):
+        raise ValueError(
+            "Kiến trúc Detect hiện tại yêu cầu "
+            "train.loss.strides=[8, 16, 32]."
+        )
 
 
 if __name__ == "__main__":
     args = parse_args()
-    data_dir = args.data_dir.expanduser().resolve()
-    default_output_dir = (
-        DEFAULT_FULL_OUTPUT_DIR if args.full_model else DEFAULT_OUTPUT_DIR
+    raw_config, config_dir = load_config(args.config)
+    train_section = get_section(raw_config, "train")
+    loss_section = train_section.get("loss")
+    if not isinstance(loss_section, dict):
+        raise ValueError("config.yaml phải chứa section 'train.loss'.")
+
+    data_dir = resolve_config_path(
+        train_section["data_dir"], config_dir, "train.data_dir"
     )
-    output_dir = (
-        args.output_dir.expanduser().resolve()
-        if args.output_dir is not None
-        else default_output_dir
+    pretrained_path = resolve_config_path(
+        train_section["pretrained"], config_dir, "train.pretrained"
+    )
+    full_model = bool(train_section["full_model"])
+    configured_output_dir = resolve_config_path(
+        train_section.get("output_dir"),
+        config_dir,
+        "train.output_dir",
+        allow_none=True,
+    )
+    output_dir = configured_output_dir or (
+        config_dir
+        / "runs"
+        / ("visdrone_full" if full_model else "visdrone_backbone")
     )
 
     training_config = TrainConfig(
@@ -517,21 +537,32 @@ if __name__ == "__main__":
         train_labels=data_dir / "VisDrone2019-DET-train" / "annotations",
         val_images=data_dir / "VisDrone2019-DET-val" / "images",
         val_labels=data_dir / "VisDrone2019-DET-val" / "annotations",
-        pretrained_path=args.pretrained.expanduser().resolve(),
+        pretrained_path=pretrained_path,
         output_dir=output_dir,
-        image_size=args.image_size,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        num_workers=args.workers,
-        learning_rate=args.lr,
-        min_learning_rate=args.min_lr,
-        weight_decay=args.weight_decay,
-        gradient_clip_norm=args.gradient_clip,
-        use_augmentation=not args.no_augmentation,
-        use_amp=not args.no_amp,
-        full_model=args.full_model,
-        seed=args.seed,
-        log_interval=args.log_interval,
+        num_classes=int(train_section["num_classes"]),
+        image_size=int(train_section["image_size"]),
+        epochs=int(train_section["epochs"]),
+        batch_size=int(train_section["batch_size"]),
+        num_workers=int(train_section["workers"]),
+        learning_rate=float(train_section["learning_rate"]),
+        min_learning_rate=float(train_section["min_learning_rate"]),
+        weight_decay=float(train_section["weight_decay"]),
+        gradient_clip_norm=float(train_section["gradient_clip_norm"]),
+        use_augmentation=bool(train_section["augmentation"]),
+        use_amp=bool(train_section["amp"]),
+        full_model=full_model,
+        seed=int(train_section["seed"]),
+        log_interval=int(train_section["log_interval"]),
+        reg_max=int(loss_section["reg_max"]),
+        strides=tuple(int(value) for value in loss_section["strides"]),
+        box_gain=float(loss_section["box_gain"]),
+        cls_gain=float(loss_section["cls_gain"]),
+        dfl_gain=float(loss_section["dfl_gain"]),
+        assigner_topk=int(loss_section["assigner_topk"]),
+        assigner_alpha=float(loss_section["assigner_alpha"]),
+        assigner_beta=float(loss_section["assigner_beta"]),
+        scale_loss_by_batch=bool(loss_section["scale_loss_by_batch"]),
     )
+    print(f"Config: {args.config.expanduser().resolve()}")
     validate_config(training_config)
     train(training_config)

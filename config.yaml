@@ -1,0 +1,67 @@
+# Các đường dẫn tương đối được tính từ thư mục chứa file config này.
+
+train:
+  data_dir: data
+  pretrained: yolo_state_dict.pt
+  # null: tự chọn runs/visdrone_backbone hoặc runs/visdrone_full.
+  output_dir: null
+  num_classes: 10
+  full_model: false
+
+  image_size: 640
+  epochs: 50
+  batch_size: 16
+  workers: 4
+
+  learning_rate: 0.001
+  min_learning_rate: 0.00001
+  weight_decay: 0.0005
+  gradient_clip_norm: 10.0
+
+  augmentation: true
+  amp: true
+  seed: 42
+  log_interval: 20
+
+  loss:
+    reg_max: 16
+    strides: [8, 16, 32]
+    box_gain: 7.5
+    cls_gain: 0.5
+    dfl_gain: 1.5
+    assigner_topk: 10
+    assigner_alpha: 0.5
+    assigner_beta: 6.0
+    scale_loss_by_batch: true
+
+predict:
+  checkpoint: runs/visdrone_backbone/best.pt
+  image: data/VisDrone2019-DET-val/images/0000001_02999_d_0000005.jpg
+  output: runs/visdrone_backbone/prediction.jpg
+  image_size: 640
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  max_detections: 300
+  device: auto
+
+test:
+  checkpoint: runs/visdrone_backbone/best.pt
+  image: data/VisDrone2019-DET-val/images/0000001_02999_d_0000005.jpg
+  output: runs/visdrone_backbone/prediction.jpg
+  # null: tự tìm file cùng tên trong thư mục annotations.
+  annotation: null
+  # null: tự đặt tên <output>_ground_truth.<ext>.
+  ground_truth_output: null
+  image_size: 640
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  max_detections: 300
+  device: auto
+  max_window_width: 620
+
+pretrained:
+  checkpoint: yolo_state_dict.pt
+  mode: backbone_neck
+  freeze_loaded: false
+  strict: true
+  num_classes: 10
