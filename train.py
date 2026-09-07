@@ -11,31 +11,31 @@ import torch
 import torch.nn as nn
 
 if __package__:
-    from .dataset import create_dataloader
-    from .load_pretrained import build_ppe_model
+    from .dataset import VISDRONE_CLASS_NAMES, create_dataloader
+    from .load_pretrained import build_detection_model
     from .loss import YOLODetectionLoss, YOLOLossConfig
 else:
-    from dataset import create_dataloader
-    from load_pretrained import build_ppe_model
+    from dataset import VISDRONE_CLASS_NAMES, create_dataloader
+    from load_pretrained import build_detection_model
     from loss import YOLODetectionLoss, YOLOLossConfig
 
 
 TRAINING_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = TRAINING_DIR / "data"
 DEFAULT_PRETRAINED_PATH = TRAINING_DIR / "yolo_state_dict.pt"
-DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "ppe_backbone"
+DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_backbone"
 
 
 @dataclass
 class TrainConfig:
-    train_images: Path = DEFAULT_DATA_DIR / "images" / "train"
-    train_labels: Path = DEFAULT_DATA_DIR / "labels" / "train"
-    val_images: Path = DEFAULT_DATA_DIR / "images" / "val"
-    val_labels: Path = DEFAULT_DATA_DIR / "labels" / "val"
+    train_images: Path = DEFAULT_DATA_DIR / "VisDrone2019-DET-train" / "images"
+    train_labels: Path = DEFAULT_DATA_DIR / "VisDrone2019-DET-train" / "annotations"
+    val_images: Path = DEFAULT_DATA_DIR / "VisDrone2019-DET-val" / "images"
+    val_labels: Path = DEFAULT_DATA_DIR / "VisDrone2019-DET-val" / "annotations"
     pretrained_path: Path = DEFAULT_PRETRAINED_PATH
     output_dir: Path = DEFAULT_OUTPUT_DIR
 
-    num_classes: int = 11
+    num_classes: int = len(VISDRONE_CLASS_NAMES)
     image_size: int = 640
     epochs: int = 50
     batch_size: int = 16
@@ -255,11 +255,12 @@ def train(config: TrainConfig) -> None:
     print(f"Device: {device}")
     print(f"AMP: {amp_enabled}")
 
-    model, load_report = build_ppe_model(
+    model, load_report = build_detection_model(
         checkpoint_path=config.pretrained_path,
         mode="backbone",
         freeze_loaded=True,
         strict=True,
+        num_classes=config.num_classes,
     )
     model = model.to(device)
     print(load_report)
@@ -301,6 +302,8 @@ def train(config: TrainConfig) -> None:
         shuffle=True,
         num_workers=config.num_workers,
         drop_last=False,
+        annotation_format="visdrone",
+        strict_labels=True,
     )
     validation_loader = create_dataloader(
         images_dir=config.val_images,
@@ -312,6 +315,8 @@ def train(config: TrainConfig) -> None:
         shuffle=False,
         num_workers=config.num_workers,
         drop_last=False,
+        annotation_format="visdrone",
+        strict_labels=True,
     )
 
     optimizer = torch.optim.AdamW(
@@ -408,7 +413,7 @@ def train(config: TrainConfig) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Fine-tune YOLO11n trên PPE: freeze pretrained backbone "
+            "Fine-tune YOLO11n trên VisDrone DET: freeze pretrained backbone "
             "và train neck + detection head."
         )
     )
@@ -474,10 +479,10 @@ if __name__ == "__main__":
     data_dir = args.data_dir.expanduser().resolve()
 
     training_config = TrainConfig(
-        train_images=data_dir / "images" / "train",
-        train_labels=data_dir / "labels" / "train",
-        val_images=data_dir / "images" / "val",
-        val_labels=data_dir / "labels" / "val",
+        train_images=data_dir / "VisDrone2019-DET-train" / "images",
+        train_labels=data_dir / "VisDrone2019-DET-train" / "annotations",
+        val_images=data_dir / "VisDrone2019-DET-val" / "images",
+        val_labels=data_dir / "VisDrone2019-DET-val" / "annotations",
         pretrained_path=args.pretrained.expanduser().resolve(),
         output_dir=args.output_dir.expanduser().resolve(),
         image_size=args.image_size,

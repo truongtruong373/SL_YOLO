@@ -8,34 +8,23 @@ import numpy as np
 import torch
 
 if __package__:
+    from .dataset import VISDRONE_CLASS_NAMES
     from .model import MyYOLODetectionModel
 else:
+    from dataset import VISDRONE_CLASS_NAMES
     from model import MyYOLODetectionModel
 
 
 TRAINING_DIR = Path(__file__).resolve().parent
 DEFAULT_CHECKPOINT = (
-    TRAINING_DIR / "runs" / "ppe_backbone" / "best.pt"
+    TRAINING_DIR / "runs" / "visdrone_backbone" / "best.pt"
 )
 DEFAULT_IMAGE = (
-    TRAINING_DIR / "data" / "images" / "test" / "image633.jpg"
+    TRAINING_DIR / "data" / "VisDrone2019-DET-val" / "images" /
+    "0000001_02999_d_0000005.jpg"
 )
 DEFAULT_OUTPUT = (
-    TRAINING_DIR / "runs" / "ppe_backbone" / "prediction.jpg"
-)
-
-PPE_CLASS_NAMES = (
-    "helmet",
-    "gloves",
-    "vest",
-    "boots",
-    "goggles",
-    "none",
-    "Person",
-    "no_helmet",
-    "no_goggle",
-    "no_gloves",
-    "no_boots",
+    TRAINING_DIR / "runs" / "visdrone_backbone" / "prediction.jpg"
 )
 
 
@@ -182,7 +171,7 @@ def load_trained_model(
         )
 
     model = MyYOLODetectionModel(
-        nc=len(PPE_CLASS_NAMES)
+        nc=len(VISDRONE_CLASS_NAMES)
     )
     model.load_state_dict(state_dict, strict=True)
     model.to(device)
@@ -270,7 +259,7 @@ def decode_predictions(
         [
             level_class.reshape(
                 batch_size,
-                len(PPE_CLASS_NAMES),
+                len(VISDRONE_CLASS_NAMES),
                 -1,
             )
             for _, level_class in raw_outputs
@@ -472,8 +461,8 @@ def draw_detections(
         class_id = int(raw_class_id)
         color = class_color(class_id)
         label = (
-            f"{PPE_CLASS_NAMES[class_id]} {confidence:.2f}"
-            if 0 <= class_id < len(PPE_CLASS_NAMES)
+            f"{VISDRONE_CLASS_NAMES[class_id]} {confidence:.2f}"
+            if 0 <= class_id < len(VISDRONE_CLASS_NAMES)
             else f"class_{class_id} {confidence:.2f}"
         )
 
@@ -566,7 +555,7 @@ def predict_image(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load best.pt và thử nhận diện trên một ảnh PPE."
+        description="Load best.pt và thử nhận diện trên một ảnh VisDrone."
     )
     parser.add_argument(
         "--checkpoint",
@@ -634,8 +623,8 @@ if __name__ == "__main__":
         x1, y1, x2, y2, confidence, raw_class_id = detection
         class_id = int(raw_class_id)
         class_name = (
-            PPE_CLASS_NAMES[class_id]
-            if 0 <= class_id < len(PPE_CLASS_NAMES)
+            VISDRONE_CLASS_NAMES[class_id]
+            if 0 <= class_id < len(VISDRONE_CLASS_NAMES)
             else f"class_{class_id}"
         )
         print(

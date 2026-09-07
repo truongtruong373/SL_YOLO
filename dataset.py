@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Sequence
+from typing import Literal, Sequence
 
 import cv2
 import numpy as np
@@ -19,6 +19,23 @@ IMAGE_EXTENSIONS = {
     ".tiff",
     ".webp",
 }
+
+AnnotationFormat = Literal["yolo", "visdrone"]
+
+# VisDrone category_id 1..10. Category 0 (ignored regions) và 11
+# (others) không phải class đánh giá của bài toán DET.
+VISDRONE_CLASS_NAMES = (
+    "pedestrian",
+    "people",
+    "bicycle",
+    "car",
+    "van",
+    "truck",
+    "tricycle",
+    "awning-tricycle",
+    "bus",
+    "motor",
+)
 
 
 def _normalize_image_size(
@@ -144,11 +161,13 @@ def letterbox(
 
 class YOLODetectionDataset(Dataset):
     """
-    Dataset cho annotation YOLO:
+    Dataset detection hỗ trợ annotation YOLO hoặc VisDrone gốc.
 
-        <class_id> <center_x> <center_y> <width> <height>
+    YOLO: ``class_id center_x center_y width height`` (normalized).
+    VisDrone: ``left,top,width,height,score,category,truncation,occlusion``.
 
-    Bốn giá trị bounding box phải được chuẩn hóa trong khoảng [0, 1].
+    Với VisDrone, category 1..10 được ánh xạ về class 0..9; category
+    0 và 11 được bỏ qua theo protocol DET.
     """
 
     def __init__(
@@ -161,6 +180,7 @@ class YOLODetectionDataset(Dataset):
         horizontal_flip_probability: float = 0.5,
         scale_up: bool = True,
         strict_labels: bool = False,
+        annotation_format: AnnotationFormat = "yolo",
     ) -> None:
         super().__init__()
 
@@ -172,6 +192,7 @@ class YOLODetectionDataset(Dataset):
         self.horizontal_flip_probability = horizontal_flip_probability
         self.scale_up = scale_up
         self.strict_labels = strict_labels
+        self.annotation_format = annotation_format
 
         if not self.images_dir.is_dir():
             raise FileNotFoundError(
@@ -185,6 +206,20 @@ class YOLODetectionDataset(Dataset):
 
         if num_classes is not None and num_classes <= 0:
             raise ValueError("num_classes phải lớn hơn 0.")
+
+        if annotation_format not in ("yolo", "visdrone"):
+            raise ValueError(
+                "annotation_format phải là 'yolo' hoặc 'visdrone'."
+            )
+
+        if (
+            annotation_format == "visdrone"
+            and num_classes is not None
+            and num_classes != len(VISDRONE_CLASS_NAMES)
+        ):
+            raise ValueError(
+                "VisDrone DET có đúng 10 class (category_id 1..10)."
+            )
 
         if not 0.0 <= horizontal_flip_probability <= 1.0:
             raise ValueError(
@@ -209,7 +244,7 @@ class YOLODetectionDataset(Dataset):
         relative_path = image_path.relative_to(self.images_dir)
         return (self.labels_dir / relative_path).with_suffix(".txt")
 
-    def _load_labels(
+    def _load_yolo_labels(
         self,
         label_path: Path,
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -289,6 +324,93 @@ class YOLODetectionDataset(Dataset):
             np.asarray(boxes, dtype=np.float32).reshape(-1, 4),
         )
 
+    def _load_visdrone_labels(
+        self,
+        label_path: Path,
+        image_shape: tuple[int, int],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Đọc bbox VisDrone: left,top,width,height,score,category,..."""
+        if not label_path.exists():
+            if self.strict_labels:
+                raise FileNotFoundError(
+                    f"Không tìm thấy annotation cho ảnh: {label_path}"
+                )
+            return (
+                np.empty((0,), dtype=np.int64),
+                np.empty((0, 4), dtype=np.float32),
+            )
+
+        image_height, image_width = image_shape
+        classes: list[int] = []
+        boxes: list[list[float]] = []
+
+        with label_path.open("r", encoding="utf-8-sig") as label_file:
+            for line_number, line in enumerate(label_file, start=1):
+                fields = [field.strip() for field in line.split(",")]
+                # File VisDrone thường có dấu phẩy ở cuối dòng.
+                while fields and not fields[-1]:
+                    fields.pop()
+                if not fields:
+                    continue
+                if len(fields) < 6:
+                    raise ValueError(
+                        f"{label_path}:{line_number}: annotation VisDrone "
+                        "phải có ít nhất 6 giá trị."
+                    )
+
+                try:
+                    left, top, width, height = map(float, fields[:4])
+                    raw_category = float(fields[5])
+                except ValueError as error:
+                    raise ValueError(
+                        f"{label_path}:{line_number}: annotation không hợp lệ."
+                    ) from error
+
+                category_id = int(raw_category)
+                if raw_category != category_id:
+                    raise ValueError(
+                        f"{label_path}:{line_number}: category_id phải là số nguyên."
+                    )
+
+                # 0=ignored regions, 11=others: không dùng để tối ưu 10 class.
+                if category_id in (0, 11):
+                    continue
+                if not 1 <= category_id <= len(VISDRONE_CLASS_NAMES):
+                    raise ValueError(
+                        f"{label_path}:{line_number}: category_id="
+                        f"{category_id} không thuộc VisDrone DET."
+                    )
+                if not np.isfinite((left, top, width, height)).all():
+                    raise ValueError(
+                        f"{label_path}:{line_number}: bbox chứa NaN hoặc Inf."
+                    )
+                if width <= 0 or height <= 0:
+                    continue
+
+                x1 = min(max(left, 0.0), float(image_width))
+                y1 = min(max(top, 0.0), float(image_height))
+                x2 = min(max(left + width, 0.0), float(image_width))
+                y2 = min(max(top + height, 0.0), float(image_height))
+                clipped_width = x2 - x1
+                clipped_height = y2 - y1
+                if clipped_width <= 0 or clipped_height <= 0:
+                    continue
+
+                classes.append(category_id - 1)
+                boxes.append(
+                    [
+                        (x1 + x2) / (2.0 * image_width),
+                        (y1 + y2) / (2.0 * image_height),
+                        clipped_width / image_width,
+                        clipped_height / image_height,
+                    ]
+                )
+
+        return (
+            np.asarray(classes, dtype=np.int64),
+            np.asarray(boxes, dtype=np.float32).reshape(-1, 4),
+        )
+
     def __getitem__(
         self,
         index: int,
@@ -300,7 +422,12 @@ class YOLODetectionDataset(Dataset):
         if image is None:
             raise RuntimeError(f"Không thể đọc ảnh: {image_path}")
 
-        classes, boxes = self._load_labels(label_path)
+        if self.annotation_format == "visdrone":
+            classes, boxes = self._load_visdrone_labels(
+                label_path, image.shape[:2]
+            )
+        else:
+            classes, boxes = self._load_yolo_labels(label_path)
         image, boxes = letterbox(
             image=image,
             boxes=boxes,
@@ -379,6 +506,8 @@ def create_dataloader(
     num_workers: int = 4,
     pin_memory: bool | None = None,
     drop_last: bool = False,
+    annotation_format: AnnotationFormat = "yolo",
+    strict_labels: bool = False,
 ) -> DataLoader:
     """Tạo DataLoader sẵn sàng dùng trong vòng lặp huấn luyện."""
     if batch_size <= 0:
@@ -393,6 +522,8 @@ def create_dataloader(
         image_size=image_size,
         num_classes=num_classes,
         augment=augment,
+        annotation_format=annotation_format,
+        strict_labels=strict_labels,
     )
 
     if shuffle is None:
@@ -416,13 +547,15 @@ def create_dataloader(
 if __name__ == "__main__":
     data_root = Path(__file__).resolve().parent / "data"
     train_loader = create_dataloader(
-        images_dir=data_root / "images" / "train",
-        labels_dir=data_root / "labels" / "train",
+        images_dir=data_root / "VisDrone2019-DET-train" / "images",
+        labels_dir=data_root / "VisDrone2019-DET-train" / "annotations",
         image_size=640,
         batch_size=4,
-        num_classes=11,
+        num_classes=len(VISDRONE_CLASS_NAMES),
         augment=True,
         num_workers=0,
+        annotation_format="visdrone",
+        strict_labels=True,
     )
 
     images, targets = next(iter(train_loader))

@@ -21,13 +21,13 @@ LoadMode = Literal[
     "backbone_neck",
 ]
 
-PPE_NUM_CLASSES = 11
+DEFAULT_NUM_CLASSES = 10
 DEFAULT_CHECKPOINT = (
     Path(__file__).resolve().parent / "yolo_state_dict.pt"
 )
 
 # Block 23 là Detect head và không được load vì checkpoint COCO có 80 lớp,
-# trong khi model PPE có 11 lớp.
+# trong khi detection head của dataset đích có số lớp khác COCO.
 MODE_LAST_BLOCK: dict[str, int] = {
     "backbone": 10,
     "backbone_neck_partial": 16,
@@ -136,7 +136,7 @@ def load_yolo11n_pretrained(
     strict: bool = True,
 ) -> PretrainedLoadReport:
     """
-    Load một phần trọng số YOLO11n Detect vào model PPE.
+    Load một phần trọng số YOLO11n Detect vào model detection đích.
 
     Args:
         model:
@@ -152,7 +152,7 @@ def load_yolo11n_pretrained(
         strict:
             Nếu True, báo lỗi khi key hoặc shape của vùng được chọn không khớp.
 
-    Detection head block 23 luôn giữ nguyên để học 11 lớp PPE.
+    Detection head block 23 luôn giữ nguyên để học các lớp của dataset đích.
     """
     checkpoint_path = Path(checkpoint_path).expanduser().resolve()
     if not checkpoint_path.is_file():
@@ -259,14 +259,17 @@ def load_yolo11n_pretrained(
     )
 
 
-def build_ppe_model(
+def build_detection_model(
     checkpoint_path: str | Path = DEFAULT_CHECKPOINT,
     mode: LoadMode = "backbone_neck",
     freeze_loaded: bool = False,
     strict: bool = True,
+    num_classes: int = DEFAULT_NUM_CLASSES,
 ) -> tuple[MyYOLODetectionModel, PretrainedLoadReport]:
-    """Khởi tạo model 11 lớp PPE và load phần pretrained được chọn."""
-    model = MyYOLODetectionModel(nc=PPE_NUM_CLASSES)
+    """Khởi tạo model cho dataset đích và load phần pretrained được chọn."""
+    if num_classes <= 0:
+        raise ValueError("num_classes phải lớn hơn 0.")
+    model = MyYOLODetectionModel(nc=num_classes)
     report = load_yolo11n_pretrained(
         model=model,
         checkpoint_path=checkpoint_path,
@@ -277,9 +280,13 @@ def build_ppe_model(
     return model, report
 
 
+# Giữ alias để code cũ không bị lỗi import.
+build_ppe_model = build_detection_model
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Load pretrained YOLO11n Detect cho model PPE."
+        description="Load pretrained YOLO11n Detect cho model đích."
     )
     parser.add_argument(
         "--checkpoint",
@@ -308,7 +315,7 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
-    ppe_model, load_report = build_ppe_model(
+    detection_model, load_report = build_detection_model(
         checkpoint_path=args.checkpoint,
         mode=args.mode,
         freeze_loaded=args.freeze_loaded,
@@ -319,7 +326,7 @@ if __name__ == "__main__":
         "Số parameter có thể train:",
         sum(
             parameter.numel()
-            for parameter in ppe_model.parameters()
+            for parameter in detection_model.parameters()
             if parameter.requires_grad
         ),
     )
