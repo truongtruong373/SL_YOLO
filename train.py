@@ -5,6 +5,7 @@ import math
 import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any, Literal, cast
 
 import numpy as np
 import torch
@@ -38,6 +39,36 @@ DEFAULT_PRETRAINED_PATH = TRAINING_DIR / "yolo_state_dict.pt"
 DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_full"
 
 
+DataMode = Literal["full", "devices"]
+DeviceOrder = Literal["sequential", "shuffle", "rotate"]
+
+
+@dataclass(frozen=True)
+class DeviceConfig:
+    id: int
+    name: str
+    path: Path
+    enabled: bool = True
+
+    @property
+    def images_dir(self) -> Path:
+        return self.path / "images"
+
+    @property
+    def annotations_dir(self) -> Path:
+        return self.path / "annotations"
+
+
+@dataclass(frozen=True)
+class TrainEpochResult:
+    loss_sum: float
+    image_count: int
+
+    @property
+    def mean_loss(self) -> float:
+        return self.loss_sum / self.image_count
+
+
 @dataclass
 class TrainConfig:
     train_images: Path = DEFAULT_DATA_DIR / "VisDrone2019-DET-train" / "images"
@@ -47,9 +78,14 @@ class TrainConfig:
     pretrained_path: Path = DEFAULT_PRETRAINED_PATH
     output_dir: Path = DEFAULT_OUTPUT_DIR
 
+    data_mode: DataMode = "full"
+    rounds: int = 50
+    device_order: DeviceOrder = "sequential"
+    local_epochs: int = 1
+    devices: tuple[DeviceConfig, ...] = ()
+
     num_classes: int = len(VISDRONE_CLASS_NAMES)
     image_size: int = 640
-    epochs: int = 50
     batch_size: int = 16
     num_workers: int = 4
 
@@ -110,8 +146,8 @@ def train_one_epoch(
     use_amp: bool,
     gradient_clip_norm: float,
     log_interval: int,
-    epoch: int,
-) -> float:
+    progress_label: str,
+) -> TrainEpochResult:
     model.train()
 
     accumulated_loss = 0.0
@@ -134,7 +170,7 @@ def train_one_epoch(
 
         if not torch.isfinite(total_loss):
             raise FloatingPointError(
-                f"Loss không hữu hạn tại epoch={epoch}, "
+                f"Loss không hữu hạn tại {progress_label}, "
                 f"batch={batch_index}: {total_loss.detach().item()}"
             )
 
@@ -160,7 +196,7 @@ def train_one_epoch(
         if batch_index % log_interval == 0:
             mean_loss = accumulated_loss / processed_images
             print(
-                f"Epoch {epoch:03d} | "
+                f"{progress_label} | "
                 f"batch {batch_index:04d}/{len(dataloader):04d} | "
                 f"loss/image {mean_loss:.6f} | "
                 f"box {loss_items['box_loss'].item():.4f} | "
@@ -173,7 +209,10 @@ def train_one_epoch(
     if processed_images == 0:
         raise RuntimeError("Train DataLoader không có ảnh.")
 
-    return accumulated_loss / processed_images
+    return TrainEpochResult(
+        loss_sum=accumulated_loss,
+        image_count=processed_images,
+    )
 
 
 @torch.no_grad()
@@ -215,12 +254,76 @@ def validate(
     return accumulated_loss / processed_images
 
 
+def create_training_dataloader(
+    config: TrainConfig,
+    images_dir: Path,
+    annotations_dir: Path,
+) -> torch.utils.data.DataLoader:
+    return create_dataloader(
+        images_dir=images_dir,
+        labels_dir=annotations_dir,
+        image_size=config.image_size,
+        batch_size=config.batch_size,
+        num_classes=config.num_classes,
+        augment=config.use_augmentation,
+        shuffle=True,
+        num_workers=config.num_workers,
+        drop_last=False,
+        annotation_format="visdrone",
+        strict_labels=True,
+    )
+
+
+def enabled_devices(config: TrainConfig) -> list[DeviceConfig]:
+    return [device for device in config.devices if device.enabled]
+
+
+def devices_for_round(
+    devices: list[DeviceConfig],
+    order: DeviceOrder,
+    round_index: int,
+    seed: int,
+) -> list[DeviceConfig]:
+    """Trả về thứ tự device, lấy danh sách trong config làm thứ tự gốc."""
+    ordered_devices = list(devices)
+
+    if order == "sequential":
+        pass
+    elif order == "shuffle":
+        random.Random(seed + round_index).shuffle(ordered_devices)
+    elif order == "rotate":
+        if not ordered_devices:
+            return ordered_devices
+        offset = (round_index - 1) % len(ordered_devices)
+        ordered_devices = (
+            ordered_devices[offset:] + ordered_devices[:offset]
+        )
+    else:
+        raise ValueError(f"Chiến lược thứ tự device không hợp lệ: {order}")
+
+    return ordered_devices
+
+
+def serialize_checkpoint_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            key: serialize_checkpoint_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [serialize_checkpoint_value(item) for item in value]
+    return value
+
+
 def save_checkpoint(
     path: Path,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.LRScheduler,
-    epoch: int,
+    round_index: int,
+    device_order: tuple[int, ...],
     best_validation_loss: float,
     config: TrainConfig,
 ) -> None:
@@ -230,15 +333,15 @@ def save_checkpoint(
 
     torch.save(
         {
-            "epoch": epoch,
+            # Giữ key epoch để các công cụ đọc checkpoint cũ vẫn tương thích.
+            "epoch": round_index,
+            "round": round_index,
+            "device_order": device_order,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "best_validation_loss": best_validation_loss,
-            "config": {
-                key: str(value) if isinstance(value, Path) else value
-                for key, value in asdict(config).items()
-            },
+            "config": serialize_checkpoint_value(asdict(config)),
         },
         temporary_path,
     )
@@ -254,8 +357,19 @@ def train(config: TrainConfig) -> None:
 
     print(f"Device: {device}")
     print(f"AMP: {amp_enabled}")
+    print("Model training mode: full model from pretrained")
+    print(f"Training data mode: {config.data_mode}")
 
-    print("Training mode: full model from pretrained")
+    selected_devices = enabled_devices(config)
+    if config.data_mode == "devices":
+        configured_order = ", ".join(
+            str(device_config.id) for device_config in selected_devices
+        )
+        print(
+            f"Device order strategy: {config.device_order} | "
+            f"configured order: [{configured_order}] | "
+            f"local epochs: {config.local_epochs}"
+        )
 
     model, load_report = build_detection_model(
         checkpoint_path=config.pretrained_path,
@@ -301,19 +415,13 @@ def train(config: TrainConfig) -> None:
         )
     ).to(device)
 
-    train_loader = create_dataloader(
-        images_dir=config.train_images,
-        labels_dir=config.train_labels,
-        image_size=config.image_size,
-        batch_size=config.batch_size,
-        num_classes=config.num_classes,
-        augment=config.use_augmentation,
-        shuffle=True,
-        num_workers=config.num_workers,
-        drop_last=False,
-        annotation_format="visdrone",
-        strict_labels=True,
-    )
+    train_loader = None
+    if config.data_mode == "full":
+        train_loader = create_training_dataloader(
+            config=config,
+            images_dir=config.train_images,
+            annotations_dir=config.train_labels,
+        )
     validation_loader = create_dataloader(
         images_dir=config.val_images,
         labels_dir=config.val_labels,
@@ -334,18 +442,18 @@ def train(config: TrainConfig) -> None:
         weight_decay=config.weight_decay,
     )
 
-    def cosine_learning_rate(epoch_index: int) -> float:
-        if config.epochs <= 1:
+    def cosine_learning_rate(round_index: int) -> float:
+        if config.rounds <= 1:
             return 1.0
 
-        epoch_index = min(epoch_index, config.epochs - 1)
+        round_index = min(round_index, config.rounds - 1)
         minimum_ratio = (
             config.min_learning_rate / config.learning_rate
         )
         cosine = (
             1.0
             + math.cos(
-                math.pi * epoch_index / (config.epochs - 1)
+                math.pi * round_index / (config.rounds - 1)
             )
         ) / 2.0
         return minimum_ratio + (1.0 - minimum_ratio) * cosine
@@ -361,19 +469,86 @@ def train(config: TrainConfig) -> None:
 
     best_validation_loss = float("inf")
 
-    for epoch in range(1, config.epochs + 1):
-        train_loss = train_one_epoch(
-            model=model,
-            criterion=criterion,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            scaler=scaler,
-            device=device,
-            use_amp=amp_enabled,
-            gradient_clip_norm=config.gradient_clip_norm,
-            log_interval=config.log_interval,
-            epoch=epoch,
-        )
+    for round_index in range(1, config.rounds + 1):
+        round_loss_sum = 0.0
+        round_image_count = 0
+        current_device_order: tuple[int, ...] = ()
+
+        if config.data_mode == "full":
+            if train_loader is None:
+                raise RuntimeError("Full train DataLoader chưa được khởi tạo.")
+            result = train_one_epoch(
+                model=model,
+                criterion=criterion,
+                dataloader=train_loader,
+                optimizer=optimizer,
+                scaler=scaler,
+                device=device,
+                use_amp=amp_enabled,
+                gradient_clip_norm=config.gradient_clip_norm,
+                log_interval=config.log_interval,
+                progress_label=(
+                    f"Round {round_index:03d}/{config.rounds:03d}"
+                ),
+            )
+            round_loss_sum += result.loss_sum
+            round_image_count += result.image_count
+        else:
+            round_devices = devices_for_round(
+                devices=selected_devices,
+                order=config.device_order,
+                round_index=round_index,
+                seed=config.seed,
+            )
+            current_device_order = tuple(
+                device_config.id for device_config in round_devices
+            )
+            print(
+                f"Round {round_index:03d}/{config.rounds:03d} | "
+                f"device order: {list(current_device_order)}"
+            )
+
+            for device_position, device_config in enumerate(
+                round_devices,
+                start=1,
+            ):
+                device_loader = create_training_dataloader(
+                    config=config,
+                    images_dir=device_config.images_dir,
+                    annotations_dir=device_config.annotations_dir,
+                )
+
+                for local_epoch in range(1, config.local_epochs + 1):
+                    progress_label = (
+                        f"Round {round_index:03d}/{config.rounds:03d} | "
+                        f"{device_config.name}[id={device_config.id}] "
+                        f"({device_position}/{len(round_devices)}) | "
+                        f"local epoch {local_epoch}/{config.local_epochs}"
+                    )
+                    result = train_one_epoch(
+                        model=model,
+                        criterion=criterion,
+                        dataloader=device_loader,
+                        optimizer=optimizer,
+                        scaler=scaler,
+                        device=device,
+                        use_amp=amp_enabled,
+                        gradient_clip_norm=config.gradient_clip_norm,
+                        log_interval=config.log_interval,
+                        progress_label=progress_label,
+                    )
+                    round_loss_sum += result.loss_sum
+                    round_image_count += result.image_count
+                    print(
+                        f"{progress_label} hoàn tất | "
+                        f"loss/image {result.mean_loss:.6f}"
+                    )
+
+                del device_loader
+
+        if round_image_count == 0:
+            raise RuntimeError("Round không xử lý ảnh train nào.")
+        train_loss = round_loss_sum / round_image_count
         validation_loss = validate(
             model=model,
             criterion=criterion,
@@ -394,7 +569,8 @@ def train(config: TrainConfig) -> None:
             model=model,
             optimizer=optimizer,
             scheduler=scheduler,
-            epoch=epoch,
+            round_index=round_index,
+            device_order=current_device_order,
             best_validation_loss=best_validation_loss,
             config=config,
         )
@@ -405,13 +581,14 @@ def train(config: TrainConfig) -> None:
                 model=model,
                 optimizer=optimizer,
                 scheduler=scheduler,
-                epoch=epoch,
+                round_index=round_index,
+                device_order=current_device_order,
                 best_validation_loss=best_validation_loss,
                 config=config,
             )
 
         print(
-            f"Epoch {epoch:03d}/{config.epochs:03d} hoàn tất | "
+            f"Round {round_index:03d}/{config.rounds:03d} hoàn tất | "
             f"train loss/image {train_loss:.6f} | "
             f"val loss/image {validation_loss:.6f} | "
             f"lr {current_learning_rate:.8f} | "
@@ -434,15 +611,194 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_device_configs(
+    train_section: dict[str, Any],
+    config_dir: Path,
+) -> tuple[DeviceOrder, int, tuple[DeviceConfig, ...]]:
+    devices_section = train_section.get("devices")
+    if devices_section is None:
+        return "sequential", 1, ()
+    if not isinstance(devices_section, dict):
+        raise ValueError("Config 'train.devices' phải là một mapping YAML.")
+
+    order = cast(
+        DeviceOrder,
+        str(devices_section.get("order", "sequential")),
+    )
+    local_epochs = int(devices_section.get("local_epochs", 1))
+    raw_items = devices_section.get("items", [])
+    if not isinstance(raw_items, list):
+        raise ValueError("Config 'train.devices.items' phải là một danh sách.")
+
+    devices: list[DeviceConfig] = []
+    for item_index, raw_device in enumerate(raw_items, start=1):
+        field_prefix = f"train.devices.items[{item_index}]"
+        if not isinstance(raw_device, dict):
+            raise ValueError(f"Config '{field_prefix}' phải là một mapping.")
+
+        try:
+            device_id = int(raw_device["id"])
+            device_name = str(raw_device["name"])
+            raw_path = raw_device["path"]
+        except KeyError as error:
+            raise ValueError(
+                f"Config '{field_prefix}' thiếu field {error.args[0]!r}."
+            ) from error
+
+        enabled = raw_device.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(
+                f"Config '{field_prefix}.enabled' phải là true hoặc false."
+            )
+
+        device_path = resolve_config_path(
+            raw_path,
+            config_dir,
+            f"{field_prefix}.path",
+        )
+        if device_path is None:
+            raise ValueError(f"Config '{field_prefix}.path' không được trống.")
+
+        devices.append(
+            DeviceConfig(
+                id=device_id,
+                name=device_name,
+                path=device_path,
+                enabled=enabled,
+            )
+        )
+
+    return order, local_epochs, tuple(devices)
+
+
+def build_train_config(
+    train_section: dict[str, Any],
+    config_dir: Path,
+) -> TrainConfig:
+    loss_section = train_section.get("loss")
+    if not isinstance(loss_section, dict):
+        raise ValueError("config.yaml phải chứa section 'train.loss'.")
+
+    data_dir = resolve_config_path(
+        train_section["data_dir"], config_dir, "train.data_dir"
+    )
+    pretrained_path = resolve_config_path(
+        train_section["pretrained"], config_dir, "train.pretrained"
+    )
+    if data_dir is None or pretrained_path is None:
+        raise ValueError("data_dir và pretrained không được để trống.")
+
+    data_mode = cast(
+        DataMode,
+        str(train_section.get("data_mode", "full")),
+    )
+    configured_output_dir = resolve_config_path(
+        train_section.get("output_dir"),
+        config_dir,
+        "train.output_dir",
+        allow_none=True,
+    )
+    default_run_name = (
+        "visdrone_devices" if data_mode == "devices" else "visdrone_full"
+    )
+    output_dir = configured_output_dir or (
+        config_dir / "runs" / default_run_name
+    )
+
+    raw_rounds = train_section.get("rounds", train_section.get("epochs"))
+    if raw_rounds is None:
+        raise ValueError("Config 'train.rounds' không được để trống.")
+
+    device_order, local_epochs, devices = parse_device_configs(
+        train_section=train_section,
+        config_dir=config_dir,
+    )
+
+    return TrainConfig(
+        train_images=data_dir / "VisDrone2019-DET-train" / "images",
+        train_labels=data_dir / "VisDrone2019-DET-train" / "annotations",
+        val_images=data_dir / "VisDrone2019-DET-val" / "images",
+        val_labels=data_dir / "VisDrone2019-DET-val" / "annotations",
+        pretrained_path=pretrained_path,
+        output_dir=output_dir,
+        data_mode=data_mode,
+        rounds=int(raw_rounds),
+        device_order=device_order,
+        local_epochs=local_epochs,
+        devices=devices,
+        num_classes=int(train_section["num_classes"]),
+        image_size=int(train_section["image_size"]),
+        batch_size=int(train_section["batch_size"]),
+        num_workers=int(train_section["workers"]),
+        learning_rate=float(train_section["learning_rate"]),
+        min_learning_rate=float(train_section["min_learning_rate"]),
+        weight_decay=float(train_section["weight_decay"]),
+        gradient_clip_norm=float(train_section["gradient_clip_norm"]),
+        use_augmentation=bool(train_section["augmentation"]),
+        use_amp=bool(train_section["amp"]),
+        seed=int(train_section["seed"]),
+        log_interval=int(train_section["log_interval"]),
+        reg_max=int(loss_section["reg_max"]),
+        strides=tuple(int(value) for value in loss_section["strides"]),
+        box_gain=float(loss_section["box_gain"]),
+        cls_gain=float(loss_section["cls_gain"]),
+        dfl_gain=float(loss_section["dfl_gain"]),
+        assigner_topk=int(loss_section["assigner_topk"]),
+        assigner_alpha=float(loss_section["assigner_alpha"]),
+        assigner_beta=float(loss_section["assigner_beta"]),
+        scale_loss_by_batch=bool(loss_section["scale_loss_by_batch"]),
+    )
+
+
 def validate_config(config: TrainConfig) -> None:
+    if config.data_mode not in ("full", "devices"):
+        raise ValueError("train.data_mode phải là 'full' hoặc 'devices'.")
+    if config.rounds <= 0:
+        raise ValueError("rounds phải lớn hơn 0.")
+    if config.device_order not in ("sequential", "shuffle", "rotate"):
+        raise ValueError(
+            "train.devices.order phải là 'sequential', 'shuffle' hoặc "
+            "'rotate'."
+        )
+    if config.local_epochs <= 0:
+        raise ValueError("train.devices.local_epochs phải lớn hơn 0.")
+
+    device_ids = [device.id for device in config.devices]
+    if len(device_ids) != len(set(device_ids)):
+        raise ValueError("Device ID trong config không được trùng nhau.")
+    device_names = [device.name for device in config.devices]
+    if len(device_names) != len(set(device_names)):
+        raise ValueError("Device name trong config không được trùng nhau.")
+    for device in config.devices:
+        if device.id <= 0:
+            raise ValueError("Device ID phải lớn hơn 0.")
+        if not device.name.strip():
+            raise ValueError("Device name không được để trống.")
+
+    if config.data_mode == "devices":
+        selected_devices = enabled_devices(config)
+        if not selected_devices:
+            raise ValueError(
+                "Chế độ devices yêu cầu ít nhất một device được bật."
+            )
+        for device in selected_devices:
+            if not device.images_dir.is_dir():
+                raise FileNotFoundError(
+                    f"Không tìm thấy thư mục ảnh của {device.name}: "
+                    f"{device.images_dir}"
+                )
+            if not device.annotations_dir.is_dir():
+                raise FileNotFoundError(
+                    f"Không tìm thấy annotation của {device.name}: "
+                    f"{device.annotations_dir}"
+                )
+
     if config.num_classes != len(VISDRONE_CLASS_NAMES):
         raise ValueError("VisDrone DET phải có num_classes=10.")
     if config.image_size <= 0 or config.image_size % 32 != 0:
         raise ValueError(
             "image_size phải lớn hơn 0 và chia hết cho 32."
         )
-    if config.epochs <= 0:
-        raise ValueError("epochs phải lớn hơn 0.")
     if config.batch_size <= 0:
         raise ValueError("batch_size phải lớn hơn 0.")
     if config.num_workers < 0:
@@ -476,56 +832,7 @@ if __name__ == "__main__":
     args = parse_args()
     raw_config, config_dir = load_config(args.config)
     train_section = get_section(raw_config, "train")
-    loss_section = train_section.get("loss")
-    if not isinstance(loss_section, dict):
-        raise ValueError("config.yaml phải chứa section 'train.loss'.")
-
-    data_dir = resolve_config_path(
-        train_section["data_dir"], config_dir, "train.data_dir"
-    )
-    pretrained_path = resolve_config_path(
-        train_section["pretrained"], config_dir, "train.pretrained"
-    )
-    configured_output_dir = resolve_config_path(
-        train_section.get("output_dir"),
-        config_dir,
-        "train.output_dir",
-        allow_none=True,
-    )
-    output_dir = configured_output_dir or (
-        config_dir / "runs" / "visdrone_full"
-    )
-
-    training_config = TrainConfig(
-        train_images=data_dir / "VisDrone2019-DET-train" / "images",
-        train_labels=data_dir / "VisDrone2019-DET-train" / "annotations",
-        val_images=data_dir / "VisDrone2019-DET-val" / "images",
-        val_labels=data_dir / "VisDrone2019-DET-val" / "annotations",
-        pretrained_path=pretrained_path,
-        output_dir=output_dir,
-        num_classes=int(train_section["num_classes"]),
-        image_size=int(train_section["image_size"]),
-        epochs=int(train_section["epochs"]),
-        batch_size=int(train_section["batch_size"]),
-        num_workers=int(train_section["workers"]),
-        learning_rate=float(train_section["learning_rate"]),
-        min_learning_rate=float(train_section["min_learning_rate"]),
-        weight_decay=float(train_section["weight_decay"]),
-        gradient_clip_norm=float(train_section["gradient_clip_norm"]),
-        use_augmentation=bool(train_section["augmentation"]),
-        use_amp=bool(train_section["amp"]),
-        seed=int(train_section["seed"]),
-        log_interval=int(train_section["log_interval"]),
-        reg_max=int(loss_section["reg_max"]),
-        strides=tuple(int(value) for value in loss_section["strides"]),
-        box_gain=float(loss_section["box_gain"]),
-        cls_gain=float(loss_section["cls_gain"]),
-        dfl_gain=float(loss_section["dfl_gain"]),
-        assigner_topk=int(loss_section["assigner_topk"]),
-        assigner_alpha=float(loss_section["assigner_alpha"]),
-        assigner_beta=float(loss_section["assigner_beta"]),
-        scale_loss_by_batch=bool(loss_section["scale_loss_by_batch"]),
-    )
+    training_config = build_train_config(train_section, config_dir)
     print(f"Config: {args.config.expanduser().resolve()}")
     validate_config(training_config)
     train(training_config)

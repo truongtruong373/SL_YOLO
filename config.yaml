@@ -1,16 +1,58 @@
 # Các đường dẫn tương đối được tính từ thư mục chứa file config này.
 
 train:
+  # full: train toàn bộ tập train; devices: train lần lượt từng device.
+  data_mode: devices
   data_dir: data
   pretrained: yolo_state_dict.pt
-  # null: tự chọn runs/visdrone_full.
+  # null: tự chọn runs/visdrone_full hoặc runs/visdrone_devices.
   output_dir: null
   num_classes: 10
 
   image_size: 640
-  epochs: 50
-  batch_size: 16
-  workers: 4
+  # Một round kết thúc sau khi toàn bộ device được chọn đã train xong.
+  rounds: 2
+  batch_size: 4
+  workers: 0
+
+  devices:
+    # sequential: giữ nguyên thứ tự items; shuffle: xáo trộn mỗi round;
+    # rotate: dịch device bắt đầu sau mỗi round.
+    order: sequential
+    local_epochs: 1
+    items:
+      - id: 1
+        name: device_01
+        path: data/VisDrone2019-DET-train-non-iid-8/device_01
+        enabled: true
+      - id: 2
+        name: device_02
+        path: data/VisDrone2019-DET-train-non-iid-8/device_02
+        enabled: false
+      - id: 3
+        name: device_03
+        path: data/VisDrone2019-DET-train-non-iid-8/device_03
+        enabled: false
+      - id: 4
+        name: device_04
+        path: data/VisDrone2019-DET-train-non-iid-8/device_04
+        enabled: false
+      - id: 5
+        name: device_05
+        path: data/VisDrone2019-DET-train-non-iid-8/device_05
+        enabled: false
+      - id: 6
+        name: device_06
+        path: data/VisDrone2019-DET-train-non-iid-8/device_06
+        enabled: false
+      - id: 7
+        name: device_07
+        path: data/VisDrone2019-DET-train-non-iid-8/device_07
+        enabled: false
+      - id: 8
+        name: device_08
+        path: data/VisDrone2019-DET-train-non-iid-8/device_08
+        enabled: true
 
   learning_rate: 0.001
   min_learning_rate: 0.00001
@@ -34,9 +76,9 @@ train:
     scale_loss_by_batch: true
 
 predict:
-  checkpoint: runs/visdrone_full/best.pt
+  checkpoint: runs/visdrone_devices/best.pt
   image: data/VisDrone2019-DET-val/images/0000001_02999_d_0000005.jpg
-  output: runs/visdrone_full/prediction.jpg
+  output: runs/visdrone_devices/prediction.jpg
   image_size: 640
   confidence_threshold: 0.25
   iou_threshold: 0.45
@@ -44,9 +86,9 @@ predict:
   device: auto
 
 test:
-  checkpoint: runs/visdrone_full/best.pt
+  checkpoint: runs/visdrone_devices/best.pt
   image: data/VisDrone2019-DET-val/images/0000001_02999_d_0000005.jpg
-  output: runs/visdrone_full/prediction.jpg
+  output: runs/visdrone_devices/prediction.jpg
   # null: tự tìm file cùng tên trong thư mục annotations.
   annotation: null
   # null: tự đặt tên <output>_ground_truth.<ext>.
