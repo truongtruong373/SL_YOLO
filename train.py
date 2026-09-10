@@ -35,7 +35,7 @@ else:
 TRAINING_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = TRAINING_DIR / "data"
 DEFAULT_PRETRAINED_PATH = TRAINING_DIR / "yolo_state_dict.pt"
-DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_backbone"
+DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_full"
 
 
 @dataclass
@@ -60,7 +60,6 @@ class TrainConfig:
 
     use_augmentation: bool = True
     use_amp: bool = True
-    full_model: bool = False
     seed: int = 42
     log_interval: int = 20
 
@@ -101,27 +100,6 @@ def move_targets_to_device(
     }
 
 
-def keep_backbone_frozen(model: nn.Module) -> None:
-    """
-    Giữ block backbone 0-10 ở eval mode.
-
-    ``requires_grad=False`` ngăn cập nhật weight, còn ``eval()`` ngăn
-    BatchNorm cập nhật running_mean và running_var trong lúc fine-tune.
-    """
-    model_blocks = getattr(model, "model", None)
-    if model_blocks is None or len(model_blocks) < 11:
-        raise RuntimeError(
-            "Model không có cấu trúc block 0-10 như YOLO11n hiện tại."
-        )
-
-    for block_index in range(11):
-        block = model_blocks[block_index]
-        block.eval()
-
-        for parameter in block.parameters():
-            parameter.requires_grad = False
-
-
 def train_one_epoch(
     model: nn.Module,
     criterion: YOLODetectionLoss,
@@ -133,11 +111,8 @@ def train_one_epoch(
     gradient_clip_norm: float,
     log_interval: int,
     epoch: int,
-    freeze_backbone: bool,
 ) -> float:
     model.train()
-    if freeze_backbone:
-        keep_backbone_frozen(model)
 
     accumulated_loss = 0.0
     processed_images = 0
@@ -280,19 +255,12 @@ def train(config: TrainConfig) -> None:
     print(f"Device: {device}")
     print(f"AMP: {amp_enabled}")
 
-    pretrained_mode = (
-        "backbone_neck" if config.full_model else "backbone"
-    )
-    freeze_pretrained = not config.full_model
-    training_mode = (
-        "full model" if config.full_model else "frozen backbone"
-    )
-    print(f"Training mode: {training_mode}")
+    print("Training mode: full model from pretrained")
 
     model, load_report = build_detection_model(
         checkpoint_path=config.pretrained_path,
-        mode=pretrained_mode,
-        freeze_loaded=freeze_pretrained,
+        mode="backbone_neck",
+        freeze_loaded=False,
         strict=True,
         num_classes=config.num_classes,
     )
@@ -405,7 +373,6 @@ def train(config: TrainConfig) -> None:
             gradient_clip_norm=config.gradient_clip_norm,
             log_interval=config.log_interval,
             epoch=epoch,
-            freeze_backbone=not config.full_model,
         )
         validation_loss = validate(
             model=model,
@@ -519,7 +486,6 @@ if __name__ == "__main__":
     pretrained_path = resolve_config_path(
         train_section["pretrained"], config_dir, "train.pretrained"
     )
-    full_model = bool(train_section["full_model"])
     configured_output_dir = resolve_config_path(
         train_section.get("output_dir"),
         config_dir,
@@ -527,9 +493,7 @@ if __name__ == "__main__":
         allow_none=True,
     )
     output_dir = configured_output_dir or (
-        config_dir
-        / "runs"
-        / ("visdrone_full" if full_model else "visdrone_backbone")
+        config_dir / "runs" / "visdrone_full"
     )
 
     training_config = TrainConfig(
@@ -550,7 +514,6 @@ if __name__ == "__main__":
         gradient_clip_norm=float(train_section["gradient_clip_norm"]),
         use_augmentation=bool(train_section["augmentation"]),
         use_amp=bool(train_section["amp"]),
-        full_model=full_model,
         seed=int(train_section["seed"]),
         log_interval=int(train_section["log_interval"]),
         reg_max=int(loss_section["reg_max"]),

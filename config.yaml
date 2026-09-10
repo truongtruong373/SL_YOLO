@@ -3,10 +3,9 @@
 train:
   data_dir: data
   pretrained: yolo_state_dict.pt
-  # null: tự chọn runs/visdrone_backbone hoặc runs/visdrone_full.
+  # null: tự chọn runs/visdrone_full.
   output_dir: null
   num_classes: 10
-  full_model: false
 
   image_size: 640
   epochs: 50
@@ -35,9 +34,9 @@ train:
     scale_loss_by_batch: true
 
 predict:
-  checkpoint: runs/visdrone_backbone/best.pt
+  checkpoint: runs/visdrone_full/best.pt
   image: data/VisDrone2019-DET-val/images/0000001_02999_d_0000005.jpg
-  output: runs/visdrone_backbone/prediction.jpg
+  output: runs/visdrone_full/prediction.jpg
   image_size: 640
   confidence_threshold: 0.25
   iou_threshold: 0.45
@@ -45,9 +44,9 @@ predict:
   device: auto
 
 test:
-  checkpoint: runs/visdrone_backbone/best.pt
+  checkpoint: runs/visdrone_full/best.pt
   image: data/VisDrone2019-DET-val/images/0000001_02999_d_0000005.jpg
-  output: runs/visdrone_backbone/prediction.jpg
+  output: runs/visdrone_full/prediction.jpg
   # null: tự tìm file cùng tên trong thư mục annotations.
   annotation: null
   # null: tự đặt tên <output>_ground_truth.<ext>.
