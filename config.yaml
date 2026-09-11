@@ -16,6 +16,8 @@ train:
   workers: 0
 
   devices:
+    # Đổi phần đường dẫn bên dưới sang VisDrone2019-DET-train-iid-8/device_XX
+    # để huấn luyện với partition IID tạo bởi create_data_partitions.py.
     # sequential: giữ nguyên thứ tự items; shuffle: xáo trộn mỗi round;
     # rotate: dịch device bắt đầu sau mỗi round.
     order: sequential

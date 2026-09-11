@@ -1,13 +1,13 @@
 # SL-YOLO
 
-SL-YOLO mô phỏng quá trình huấn luyện một mô hình phát hiện đối tượng lần lượt qua nhiều thiết bị có phân phối dữ liệu non-IID. Mô hình sử dụng kiến trúc YOLO11n được dựng lại trực tiếp bằng PyTorch thay vì gọi model từ thư viện Ultralytics. Dữ liệu dùng cho huấn luyện và kiểm thử là VisDrone2019-DET với 10 lớp đối tượng.
+SL-YOLO mô phỏng quá trình huấn luyện một mô hình phát hiện đối tượng lần lượt qua nhiều thiết bị có phân phối dữ liệu IID hoặc non-IID. Mô hình sử dụng kiến trúc YOLO11n được dựng lại trực tiếp bằng PyTorch thay vì gọi model từ thư viện Ultralytics. Dữ liệu dùng cho huấn luyện và kiểm thử là VisDrone2019-DET với 10 lớp đối tượng.
 
 Project hỗ trợ hai luồng huấn luyện:
 
 - `full`: huấn luyện trên toàn bộ tập train như một dataset thông thường.
 - `devices`: đưa cùng một model qua từng device; khi tất cả device được chọn hoàn tất thì kết thúc một round.
 
-Luồng `devices` là mô phỏng huấn luyện tuần tự/continual trên dữ liệu non-IID. Đây chưa phải federated learning hoàn chỉnh vì không tạo model cục bộ độc lập và không có bước tổng hợp trọng số như FedAvg.
+Luồng `devices` là mô phỏng huấn luyện tuần tự/continual trên các partition IID hoặc non-IID. Đây chưa phải federated learning hoàn chỉnh vì không tạo model cục bộ độc lập và không có bước tổng hợp trọng số như FedAvg.
 
 ## Thành phần chính
 
@@ -23,7 +23,7 @@ SL_YOLO/
 ├── test.py                         # So sánh trực quan prediction và ground truth
 ├── scripts/data/
 │   ├── generate_non_iid_labels.py  # Tạo nhãn số object cho việc chia dữ liệu
-│   ├── create_non_iid_partitions.py # Chia tập train thành các device non-IID
+│   ├── create_data_partitions.py    # Chia tập train thành device IID/non-IID
 │   └── plot_label_distribution.py  # Vẽ phân phối số object trên mỗi ảnh
 ├── yolo_state_dict.pt              # Pretrained checkpoint
 └── requirement.txt
@@ -70,7 +70,7 @@ left,top,width,height,score,category_id,truncation,occlusion
 
 Category `1..10` được ánh xạ thành class `0..9`. Category `0` (ignored regions) và `11` (others) không được dùng làm class huấn luyện.
 
-## Chia dữ liệu non-IID
+## Chia dữ liệu IID hoặc non-IID
 
 ### 1. Tạo label theo số lượng object
 
@@ -103,10 +103,11 @@ python3 scripts/data/plot_label_distribution.py
 
 Biểu đồ mặc định được lưu tại `runs/label_distribution.png`.
 
-### 3. Tạo các device
+### 3. Tạo các device non-IID
 
 ```bash
-python3 scripts/data/create_non_iid_partitions.py --devices 8
+/home/truong/truongtd/bin/python scripts/data/create_data_partitions.py \
+  --strategy non-iid --devices 8
 ```
 
 Cách chia dữ liệu:
@@ -133,6 +134,28 @@ data/VisDrone2019-DET-train-non-iid-8/
 ```
 
 Các file dữ liệu trong device là symbolic link đến dataset gốc để không nhân đôi ảnh. Vì vậy không nên di chuyển hoặc xóa dataset nguồn sau khi chia. Script không ghi đè thư mục output đã tồn tại; hãy chọn `--output-dir` khác nếu muốn giữ kết quả cũ.
+
+### 4. Tạo 8 device IID
+
+```bash
+/home/truong/truongtd/bin/python scripts/data/create_data_partitions.py \
+  --strategy iid --devices 8 --seed 42
+```
+
+Với chiến lược IID, mỗi ảnh chỉ xuất hiện đúng một lần nhưng các ảnh có cùng
+`source_id` được phép nằm trên nhiều device. Script phân tầng theo tổng số
+object trong ảnh, sau đó cân bằng thêm số object của 10 class. Vì vậy:
+
+- chênh lệch tổng số ảnh giữa các device không quá 1;
+- tại mỗi giá trị `object_count`, số ảnh giữa các device chênh không quá 1;
+- class hiếm được ưu tiên đưa tới device đang thiếu class đó.
+
+Kết quả mặc định nằm tại
+`data/VisDrone2019-DET-train-iid-8/`. File `summary.json` chứa histogram
+`object_count`, tổng object và tỷ lệ của từng class trên mỗi device để kiểm tra
+mức độ IID. Thay đường dẫn trong `train.devices.items` của `config.yaml` từ
+`VisDrone2019-DET-train-non-iid-8` sang `VisDrone2019-DET-train-iid-8` để train
+trên partition mới.
 
 ## Cấu hình huấn luyện
 
