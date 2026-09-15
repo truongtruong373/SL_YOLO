@@ -268,10 +268,30 @@ Sau mỗi round, chương trình in:
 
 - Train loss trên mỗi ảnh của toàn round.
 - Validation loss trên tập `VisDrone2019-DET-val`.
+- Precision, recall và F1 tại `f1_confidence_threshold`.
+- `mAP50` và `mAP50-95` trên toàn bộ validation set.
 - Learning rate hiện tại.
-- Best validation loss.
+- Giá trị metric đang dùng để chọn `best.pt`.
 
-Có thể dùng validation loss và `best.pt` để so sánh các cấu hình huấn luyện trong cùng điều kiện.
+Kết quả tổng hợp của từng round được nối thêm vào
+`<output_dir>/metrics.csv`. Metric của 10 class được ghi vào
+`<output_dir>/metrics_per_class.jsonl`. Mỗi dòng JSON chứa kết quả của một
+round nên có thể đọc tuần tự mà không cần nạp toàn bộ file.
+
+Cấu hình evaluator nằm trong section `train.evaluation`:
+
+```yaml
+evaluation:
+  confidence_threshold: 0.001
+  nms_iou_threshold: 0.7
+  f1_confidence_threshold: 0.25
+  max_detections: 300
+  best_metric: map50_95
+```
+
+`confidence_threshold` được giữ thấp để tính AP trên gần như toàn bộ đường
+cong precision-recall. `best_metric` hỗ trợ `val_loss`, `f1`, `map50` hoặc
+`map50_95`; mặc định checkpoint tốt nhất được chọn theo `map50_95`.
 
 ### So sánh prediction với ground truth
 
@@ -290,7 +310,10 @@ Script sẽ:
 
 Chức năng hiển thị yêu cầu môi trường desktop và gói `opencv-python` có GUI. Trên server headless, có thể dùng `predict_image.py` và xem các file output sau khi tải về.
 
-`test.py` hiện chỉ hỗ trợ đánh giá định tính trên một ảnh; project chưa triển khai mAP, precision, recall hoặc đánh giá toàn bộ validation set. Để báo cáo theo chuẩn object detection, cần bổ sung evaluator cho mAP@0.5 và mAP@0.5:0.95.
+`test.py` vẫn dùng để đánh giá định tính trên một ảnh. Các metric trong quá
+trình train dùng cách ghép prediction-ground truth kiểu YOLO/COCO. Dataset
+hiện bỏ category `0` và `11`; vì vậy kết quả này phù hợp để so sánh các round
+nội bộ nhưng chưa xử lý ignored regions theo evaluator VisDrone chính thức.
 
 ## Kiểm tra pretrained checkpoint
 

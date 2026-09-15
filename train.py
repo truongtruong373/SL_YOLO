@@ -19,8 +19,16 @@ if __package__:
         resolve_config_path,
     )
     from .dataset import VISDRONE_CLASS_NAMES, create_dataloader
+    from .evaluation import (
+        DetectionMetricAccumulator,
+        ValidationResult,
+        append_evaluation_files,
+        initialize_evaluation_files,
+        xywh_to_xyxy,
+    )
     from .load_pretrained import build_detection_model
     from .loss import YOLODetectionLoss, YOLOLossConfig
+    from .predict_image import decode_predictions, postprocess
 else:
     from config_utils import (
         DEFAULT_CONFIG_PATH,
@@ -29,8 +37,16 @@ else:
         resolve_config_path,
     )
     from dataset import VISDRONE_CLASS_NAMES, create_dataloader
+    from evaluation import (
+        DetectionMetricAccumulator,
+        ValidationResult,
+        append_evaluation_files,
+        initialize_evaluation_files,
+        xywh_to_xyxy,
+    )
     from load_pretrained import build_detection_model
     from loss import YOLODetectionLoss, YOLOLossConfig
+    from predict_image import decode_predictions, postprocess
 
 
 TRAINING_DIR = Path(__file__).resolve().parent
@@ -41,6 +57,7 @@ DEFAULT_OUTPUT_DIR = TRAINING_DIR / "runs" / "visdrone_full"
 
 DataMode = Literal["full", "devices"]
 DeviceOrder = Literal["sequential", "shuffle", "rotate"]
+BestMetric = Literal["val_loss", "f1", "map50", "map50_95"]
 
 
 @dataclass(frozen=True)
@@ -98,6 +115,12 @@ class TrainConfig:
     use_amp: bool = True
     seed: int = 42
     log_interval: int = 20
+
+    evaluation_confidence_threshold: float = 0.001
+    evaluation_nms_iou_threshold: float = 0.7
+    evaluation_f1_confidence_threshold: float = 0.25
+    evaluation_max_detections: int = 300
+    best_metric: BestMetric = "map50_95"
 
     reg_max: int = 16
     strides: tuple[int, ...] = (8, 16, 32)
@@ -222,11 +245,19 @@ def validate(
     dataloader: torch.utils.data.DataLoader,
     device: torch.device,
     use_amp: bool,
-) -> float:
+    confidence_threshold: float,
+    nms_iou_threshold: float,
+    f1_confidence_threshold: float,
+    max_detections: int,
+) -> ValidationResult:
     model.eval()
 
     accumulated_loss = 0.0
     processed_images = 0
+    metric_accumulator = DetectionMetricAccumulator(
+        class_names=VISDRONE_CLASS_NAMES,
+        f1_confidence_threshold=f1_confidence_threshold,
+    )
 
     for images, targets in dataloader:
         images = images.to(device=device, non_blocking=True)
@@ -248,10 +279,39 @@ def validate(
         accumulated_loss += total_loss.item()
         processed_images += images.shape[0]
 
+        decoded_boxes, class_scores = decode_predictions(
+            predictions,
+            reg_max=criterion.config.reg_max,
+            strides=criterion.config.strides,
+        )
+        image_height, image_width = images.shape[-2:]
+        for image_index in range(images.shape[0]):
+            detections = postprocess(
+                boxes=decoded_boxes[image_index : image_index + 1],
+                class_scores=class_scores[image_index : image_index + 1],
+                confidence_threshold=confidence_threshold,
+                iou_threshold=nms_iou_threshold,
+                max_detections=max_detections,
+            )
+            target_mask = targets["batch_idx"] == image_index
+            target_boxes = xywh_to_xyxy(
+                targets["bboxes"][target_mask],
+                width=image_width,
+                height=image_height,
+            )
+            metric_accumulator.update(
+                detections=detections,
+                target_boxes=target_boxes,
+                target_classes=targets["cls"][target_mask],
+            )
+
     if processed_images == 0:
         raise RuntimeError("Validation DataLoader không có ảnh.")
 
-    return accumulated_loss / processed_images
+    return ValidationResult(
+        loss=accumulated_loss / processed_images,
+        metrics=metric_accumulator.compute(),
+    )
 
 
 def create_training_dataloader(
@@ -325,6 +385,8 @@ def save_checkpoint(
     round_index: int,
     device_order: tuple[int, ...],
     best_validation_loss: float,
+    best_metric_name: BestMetric,
+    best_metric_value: float,
     config: TrainConfig,
 ) -> None:
     """Lưu checkpoint qua file tạm để tránh checkpoint bị ghi dở."""
@@ -341,6 +403,8 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "best_validation_loss": best_validation_loss,
+            "best_metric_name": best_metric_name,
+            "best_metric_value": best_metric_value,
             "config": serialize_checkpoint_value(asdict(config)),
         },
         temporary_path,
@@ -467,7 +531,11 @@ def train(config: TrainConfig) -> None:
         enabled=amp_enabled,
     )
 
+    initialize_evaluation_files(config.output_dir)
     best_validation_loss = float("inf")
+    best_metric_value = (
+        float("inf") if config.best_metric == "val_loss" else float("-inf")
+    )
 
     for round_index in range(1, config.rounds + 1):
         round_loss_sum = 0.0
@@ -549,18 +617,39 @@ def train(config: TrainConfig) -> None:
         if round_image_count == 0:
             raise RuntimeError("Round không xử lý ảnh train nào.")
         train_loss = round_loss_sum / round_image_count
-        validation_loss = validate(
+        validation_result = validate(
             model=model,
             criterion=criterion,
             dataloader=validation_loader,
             device=device,
             use_amp=amp_enabled,
+            confidence_threshold=config.evaluation_confidence_threshold,
+            nms_iou_threshold=config.evaluation_nms_iou_threshold,
+            f1_confidence_threshold=(
+                config.evaluation_f1_confidence_threshold
+            ),
+            max_detections=config.evaluation_max_detections,
         )
+        validation_loss = validation_result.loss
 
         current_learning_rate = optimizer.param_groups[0]["lr"]
-        is_best = validation_loss < best_validation_loss
-        if is_best:
+        if validation_loss < best_validation_loss:
             best_validation_loss = validation_loss
+
+        metric_values = {
+            "val_loss": validation_result.loss,
+            "f1": validation_result.f1,
+            "map50": validation_result.map50,
+            "map50_95": validation_result.map50_95,
+        }
+        current_metric_value = metric_values[config.best_metric]
+        is_best = (
+            current_metric_value < best_metric_value
+            if config.best_metric == "val_loss"
+            else current_metric_value > best_metric_value
+        )
+        if is_best:
+            best_metric_value = current_metric_value
 
         scheduler.step()
 
@@ -572,6 +661,8 @@ def train(config: TrainConfig) -> None:
             round_index=round_index,
             device_order=current_device_order,
             best_validation_loss=best_validation_loss,
+            best_metric_name=config.best_metric,
+            best_metric_value=best_metric_value,
             config=config,
         )
 
@@ -584,15 +675,31 @@ def train(config: TrainConfig) -> None:
                 round_index=round_index,
                 device_order=current_device_order,
                 best_validation_loss=best_validation_loss,
+                best_metric_name=config.best_metric,
+                best_metric_value=best_metric_value,
                 config=config,
             )
+
+        append_evaluation_files(
+            output_dir=config.output_dir,
+            round_index=round_index,
+            train_loss=train_loss,
+            result=validation_result,
+            learning_rate=current_learning_rate,
+            is_best=is_best,
+        )
 
         print(
             f"Round {round_index:03d}/{config.rounds:03d} hoàn tất | "
             f"train loss/image {train_loss:.6f} | "
             f"val loss/image {validation_loss:.6f} | "
+            f"P {validation_result.precision:.4f} | "
+            f"R {validation_result.recall:.4f} | "
+            f"F1 {validation_result.f1:.4f} | "
+            f"mAP50 {validation_result.map50:.4f} | "
+            f"mAP50-95 {validation_result.map50_95:.4f} | "
             f"lr {current_learning_rate:.8f} | "
-            f"best val {best_validation_loss:.6f}"
+            f"best {config.best_metric} {best_metric_value:.6f}"
         )
 
 
@@ -678,6 +785,9 @@ def build_train_config(
     loss_section = train_section.get("loss")
     if not isinstance(loss_section, dict):
         raise ValueError("config.yaml phải chứa section 'train.loss'.")
+    evaluation_section = train_section.get("evaluation", {})
+    if not isinstance(evaluation_section, dict):
+        raise ValueError("Config 'train.evaluation' phải là một mapping YAML.")
 
     data_dir = resolve_config_path(
         train_section["data_dir"], config_dir, "train.data_dir"
@@ -738,6 +848,22 @@ def build_train_config(
         use_amp=bool(train_section["amp"]),
         seed=int(train_section["seed"]),
         log_interval=int(train_section["log_interval"]),
+        evaluation_confidence_threshold=float(
+            evaluation_section.get("confidence_threshold", 0.001)
+        ),
+        evaluation_nms_iou_threshold=float(
+            evaluation_section.get("nms_iou_threshold", 0.7)
+        ),
+        evaluation_f1_confidence_threshold=float(
+            evaluation_section.get("f1_confidence_threshold", 0.25)
+        ),
+        evaluation_max_detections=int(
+            evaluation_section.get("max_detections", 300)
+        ),
+        best_metric=cast(
+            BestMetric,
+            str(evaluation_section.get("best_metric", "map50_95")),
+        ),
         reg_max=int(loss_section["reg_max"]),
         strides=tuple(int(value) for value in loss_section["strides"]),
         box_gain=float(loss_section["box_gain"]),
@@ -817,6 +943,25 @@ def validate_config(config: TrainConfig) -> None:
         raise ValueError("gradient_clip_norm không được âm.")
     if config.log_interval <= 0:
         raise ValueError("log_interval phải lớn hơn 0.")
+    if not 0.0 <= config.evaluation_confidence_threshold <= 1.0:
+        raise ValueError(
+            "train.evaluation.confidence_threshold phải nằm trong [0, 1]."
+        )
+    if not 0.0 <= config.evaluation_nms_iou_threshold <= 1.0:
+        raise ValueError(
+            "train.evaluation.nms_iou_threshold phải nằm trong [0, 1]."
+        )
+    if not 0.0 <= config.evaluation_f1_confidence_threshold <= 1.0:
+        raise ValueError(
+            "train.evaluation.f1_confidence_threshold phải nằm trong [0, 1]."
+        )
+    if config.evaluation_max_detections <= 0:
+        raise ValueError("train.evaluation.max_detections phải lớn hơn 0.")
+    if config.best_metric not in ("val_loss", "f1", "map50", "map50_95"):
+        raise ValueError(
+            "train.evaluation.best_metric phải là 'val_loss', 'f1', "
+            "'map50' hoặc 'map50_95'."
+        )
     if config.reg_max != 16:
         raise ValueError(
             "Kiến trúc Detect hiện tại yêu cầu train.loss.reg_max=16."

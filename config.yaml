@@ -12,7 +12,7 @@ train:
   image_size: 640
   # Một round kết thúc sau khi toàn bộ device được chọn đã train xong.
   rounds: 2
-  batch_size: 4
+  batch_size: 8
   workers: 0
 
   devices:
@@ -25,7 +25,7 @@ train:
     items:
       - id: 1
         name: device_01
-        path: data/VisDrone2019-DET-train-non-iid-8/device_01
+        path: data/VisDrone2019-DET-train-iid-8/device_01
         enabled: true
       - id: 2
         name: device_02
@@ -53,7 +53,7 @@ train:
         enabled: false
       - id: 8
         name: device_08
-        path: data/VisDrone2019-DET-train-non-iid-8/device_08
+        path: data/VisDrone2019-DET-train-iid-8/device_08
         enabled: true
 
   learning_rate: 0.001
@@ -65,6 +65,16 @@ train:
   amp: true
   seed: 42
   log_interval: 20
+
+  evaluation:
+    # Giữ threshold thấp để AP được tính trên gần như toàn bộ đường cong PR.
+    confidence_threshold: 0.001
+    nms_iou_threshold: 0.7
+    # Precision/recall/F1 được báo cáo tại confidence threshold này.
+    f1_confidence_threshold: 0.25
+    max_detections: 300
+    # Một trong: val_loss, f1, map50, map50_95.
+    best_metric: map50_95
 
   loss:
     reg_max: 16
