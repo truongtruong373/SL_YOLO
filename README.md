@@ -264,7 +264,12 @@ python3 predict_image.py
 
 ### Theo dõi trong quá trình train
 
-Sau mỗi round, chương trình in:
+Trong mỗi local epoch, `tqdm` hiển thị số batch đã xử lý, tốc độ, thời gian
+dự kiến còn lại, loss trung bình trên mỗi ảnh và các thành phần
+`box/cls/dfl`. Validation cũng có thanh tiến trình riêng.
+
+Sau mỗi round, chương trình luôn in train loss và learning rate. Ở các round
+được evaluate, chương trình in thêm:
 
 - Train loss trên mỗi ảnh của toàn round.
 - Validation loss trên tập `VisDrone2019-DET-val`.
@@ -282,6 +287,7 @@ Cấu hình evaluator nằm trong section `train.evaluation`:
 
 ```yaml
 evaluation:
+  interval: 5
   confidence_threshold: 0.001
   nms_iou_threshold: 0.7
   f1_confidence_threshold: 0.25
@@ -290,8 +296,11 @@ evaluation:
 ```
 
 `confidence_threshold` được giữ thấp để tính AP trên gần như toàn bộ đường
-cong precision-recall. `best_metric` hỗ trợ `val_loss`, `f1`, `map50` hoặc
-`map50_95`; mặc định checkpoint tốt nhất được chọn theo `map50_95`.
+cong precision-recall. `interval: 5` chạy evaluation sau mỗi 5 round; round
+cuối cùng luôn được evaluate dù không chia hết cho interval. `last.pt` vẫn
+được lưu mỗi round, còn `best.pt` chỉ được cập nhật ở những round có
+evaluation. `best_metric` hỗ trợ `val_loss`, `f1`, `map50` hoặc `map50_95`;
+mặc định checkpoint tốt nhất được chọn theo `map50_95`.
 
 ### So sánh prediction với ground truth
 
