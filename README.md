@@ -260,6 +260,54 @@ python3 predict_image.py
 
 `device: auto` ưu tiên CUDA, sau đó MPS và cuối cùng là CPU. Script in danh sách detection và lưu ảnh đã vẽ bounding box tại đường dẫn `output`.
 
+## Trực quan hóa feature map để kiểm tra privacy
+
+Section `visualize_features` chọn checkpoint, ảnh đầu vào và các layer cần
+quan sát. Mặc định project capture các layer `3, 4, 6, 10, 13, 16, 19, 22`:
+
+```yaml
+visualize_features:
+  checkpoint: runs/visdrone_devices/best.pt
+  image: data/VisDrone2019-DET-val/images/0000001_02999_d_0000005.jpg
+  output_dir: runs/visdrone_devices/privacy_features
+  image_size: 640
+  layers: [3, 4, 6, 10, 13, 16, 19, 22]
+  channels_per_layer: 16
+  colormap: magma
+  device: auto
+```
+
+Chạy:
+
+```bash
+/home/truong/truongtd/bin/python visualize_features.py
+```
+
+Thư mục output gồm:
+
+- `overview.png`: ảnh đầu vào và activation trung bình của tất cả layer.
+- `layer_XX_comparison.png`: input, `mean(abs(activation))` và ảnh overlay.
+- `layer_XX_channels.png`: các channel có biến thiên không gian lớn nhất.
+- `summary.json`: shape và thống kê activation của từng layer.
+
+Feature map được chuẩn hóa độc lập bằng percentile 1–99 để dễ quan sát, vì
+vậy màu giữa hai layer không biểu diễn cùng một thang giá trị tuyệt đối. Việc
+khó nhận ra ảnh gốc bằng mắt chỉ là kiểm tra privacy định tính; để kết luận
+mạnh hơn cần đánh giá thêm reconstruction attack hoặc khả năng suy luận thuộc
+tính từ tensor feature gốc.
+
+Để vẽ trên cùng một hình FLOPs phía client cho một ảnh và chi phí truyền FP32
+hai chiều cho một batch tại Cut A–D, chạy:
+
+```bash
+/home/truong/truongtd/bin/python scripts/plot_cut_communication.py \
+  --batch-size 8 --image-size 960
+```
+
+FLOPs train được ước lượng từ Conv và Attention của kiến trúc với
+`1 MAC = 2 FLOPs` và `backward ≈ 2 × forward`; dung lượng truyền gồm
+activation forward và gradient backward.
+
 ## Kiểm tra hiệu quả mô hình
 
 ### Theo dõi trong quá trình train

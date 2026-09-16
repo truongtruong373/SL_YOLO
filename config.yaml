@@ -113,6 +113,17 @@ test:
   device: auto
   max_window_width: 620
 
+visualize_features:
+  checkpoint: runs/visdrone_devices/best.pt
+  image: data/VisDrone2019-DET-val/images/0000001_05499_d_0000010.jpg
+  output_dir: runs/visdrone_devices/privacy_features
+  image_size: 640
+  layers: [3, 4, 6, 10, 13, 16, 19, 22]
+  # Chọn các channel có độ lệch chuẩn không gian lớn nhất để vẽ.
+  channels_per_layer: 16
+  colormap: magma
+  device: auto
+
 pretrained:
   checkpoint: yolo_state_dict.pt
   mode: backbone_neck
