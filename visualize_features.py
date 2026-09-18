@@ -203,7 +203,7 @@ def save_overview(
     flat_axes = axes.flat
     first_axis = next(flat_axes)
     first_axis.imshow(image_rgb)
-    first_axis.set_title("Đầu vào")
+    first_axis.set_title("Đầu vào", fontsize=18)
     first_axis.axis("off")
 
     for axis, (layer_index, activation) in zip(
@@ -213,7 +213,7 @@ def save_overview(
     ):
         aggregate = normalize_map(activation.abs().mean(dim=0).numpy())
         axis.imshow(aggregate, cmap=colormap, vmin=0.0, vmax=1.0)
-        axis.set_title(f"Khối {layer_index}")
+        axis.set_title(f"Khối {layer_index}", fontsize=18)
         axis.axis("off")
     for axis in flat_axes:
         axis.axis("off")

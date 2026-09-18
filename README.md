@@ -50,6 +50,36 @@ source /home/truong/truongtd/bin/activate
 
 ## Chuẩn bị VisDrone2019
 
+### Cách 1: Sử dụng file `data.tar`
+
+File `data.tar` đi kèm project chứa tập train, tập validation và các partition
+IID/non-IID đã được tạo sẵn. Từ thư mục gốc của project, giải nén bằng lệnh:
+
+```bash
+tar -xf data.tar
+```
+
+Sau khi giải nén, dữ liệu có cấu trúc chính như sau:
+
+```text
+data/
+├── VisDrone2019-DET-train/
+├── VisDrone2019-DET-val/
+├── VisDrone2019-DET-train-iid-8/
+└── VisDrone2019-DET-train-non-iid-8/
+```
+
+Có thể kiểm tra nội dung file trước khi giải nén bằng:
+
+```bash
+tar -tf data.tar | head
+```
+
+Không cần chạy lại các bước chia dữ liệu bên dưới nếu sử dụng trực tiếp các
+partition có sẵn trong file nén.
+
+### Cách 2: Chuẩn bị dữ liệu thủ công
+
 Tải và giải nén `VisDrone2019-DET-train` và `VisDrone2019-DET-val` vào `data/` theo cấu trúc:
 
 ```text
